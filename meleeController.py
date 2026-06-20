@@ -5,18 +5,18 @@ import melee
 import time
 
 def main():
+
+  exi = "/home/nicholascartaxo/Slippi/exi-ai/Binaries/dolphin-emu"
+  mainline = "/home/nicholascartaxo/Slippi/mainline/Binaries/dolphin-emu-nogui"
   # Create our Console object.
   #   This will be one of the primary objects that we will interface with.
   #   The Console represents the virtual or hardware system Melee is playing on.
   #   Through this object, we can get "GameState" objects per-frame so that your
   #     bot can actually "see" what's happening in the game
   console = melee.Console(
-    path="C:/Users/USER/AppData/Roaming/Slippi Launcher/netplay-beta",
+    path=mainline,
     fullscreen=False,
-    gfx_backend="Null",
-    disable_audio=True,
-    use_exi_inputs=True,
-    enable_ffw=True,
+    save_replays=False,
   )
 
   # Create our Controller object
@@ -44,7 +44,7 @@ def main():
   signal.signal(signal.SIGINT, signal_handler)
 
   # Run the console
-  console.run(iso_path="D:/melee/Super Smash Bros. Melee (USA) (En,Ja) (v1.02).iso")
+  console.run(iso_path="/home/nicholascartaxo/melee.iso")
 
   # Connect to the console
   print("Connecting to console...")
@@ -69,8 +69,6 @@ def main():
 
   menu_helper = melee.MenuHelper()
 
-  d = time.time()
-
   # Main loop
   while True:  # Run for 10 seconds
     # "step" to the next frame
@@ -78,8 +76,8 @@ def main():
     if gamestate is None:
       continue
 
-    print(time.time()-d)
-    d = time.time()
+    if 1 in gamestate.players.keys():
+      print(gamestate.players[1].controller_state)
 
     # What menu are we in?
     if gamestate.menu_state in [melee.Menu.IN_GAME, melee.Menu.SUDDEN_DEATH]:
