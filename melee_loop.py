@@ -2,7 +2,7 @@
 import signal
 import sys
 import melee
-import time
+import melee_state
 
 def main():
 
@@ -15,8 +15,10 @@ def main():
   #     bot can actually "see" what's happening in the game
   console = melee.Console(
     path=mainline,
-    fullscreen=False,
+    fullscreen=True,
     save_replays=False,
+    enable_ffw=False,
+    use_exi_inputs=False
   )
 
   # Create our Controller object
@@ -24,20 +26,23 @@ def main():
   #   Your controller is your way of sending button presses to the game, whether
   #   virtual or physical.
 
-  ports = [1, 2]
+  controller = melee.Controller(
+    console=console,
+    port=1,
+    type=melee.ControllerType.STANDARD)
+  
+  cpuController = melee.Controller(
+    console=console,
+    port=2,
+    type=melee.ControllerType.STANDARD
+  )
 
-  controllers = {
-    port: melee.Controller(
-      console=console,
-      port=port,
-      type=melee.ControllerType.STANDARD)
-    for port in ports
-  }
+  controllers = [controller,cpuController]
 
   # This isn't necessary, but makes it so that Dolphin will get killed when you ^C
   def signal_handler(sig, frame):
-    for controller in controllers.values():
-      controller.disconnect()
+    controller.disconnect()
+    cpuController.disconnect()
     console.stop()
     sys.exit(0)
 
@@ -58,46 +63,43 @@ def main():
   #   NOTE: If you're loading a movie file, don't connect the controller,
   #   dolphin will hang waiting for input and never receive it
   print("Connecting controller to console...")
-  for controller in controllers.values():
-    if not controller.connect():
+  for c in controllers:
+    if not c.connect():
       print("ERROR: Failed to connect the controller.")
       sys.exit(-1)
-  print("Controller connected")
-
-  costume = 0
-  framedata = melee.framedata.FrameData()
+    print("Controller connected")
 
   menu_helper = melee.MenuHelper()
 
+  a = True
+
   # Main loop
-  while True:  # Run for 10 seconds
+  while True:
     # "step" to the next frame
     gamestate = console.step()
     if gamestate is None:
       continue
 
-    if 1 in gamestate.players.keys():
-      print(gamestate.players[1].controller_state)
-
     # What menu are we in?
     if gamestate.menu_state in [melee.Menu.IN_GAME, melee.Menu.SUDDEN_DEATH]:
-
-      for port, controller in controllers.items():
-        # NOTE: This is where your AI does all of its stuff!
-        # This line will get hit once per frame, so here is where you read
-        #   in the gamestate and decide what buttons to push on the controller
-        melee.techskill.multishine(ai_state=gamestate.players[port], controller=controller)
+      print(melee_state.get_state(gamestate, 1, 2)[-7:-1])
+      
+      
 
     else:
-      for port, controller in controllers.items():
-        menu_helper.menu_helper_simple(
-          gamestate,
-          controller,
-          melee.Character.FOX,
-          melee.Stage.POKEMON_STADIUM,
-          costume=port,
-          autostart=port == 1,
-          swag=False)
-
+      menu_helper.menu_helper_simple(
+        gamestate=gamestate,
+        controller=controller,
+        character_selected=melee.Character.LUIGI,
+        stage_selected=melee.Stage.BATTLEFIELD)
+      
+      menu_helper.menu_helper_simple(
+        gamestate=gamestate,
+        controller=cpuController,
+        character_selected=melee.Character.FOX,
+        stage_selected=melee.Stage.POKEMON_STADIUM,
+        cpu_level=9,
+        autostart=True)
+      
 if __name__ == "__main__":
   main()
