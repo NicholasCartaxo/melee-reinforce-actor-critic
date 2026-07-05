@@ -2,7 +2,10 @@
 import signal
 import sys
 import melee
-import melee_state
+import melee_input
+import melee_output
+import random
+import numpy as np
 
 def main():
 
@@ -82,8 +85,11 @@ def main():
 
     # What menu are we in?
     if gamestate.menu_state in [melee.Menu.IN_GAME, melee.Menu.SUDDEN_DEATH]:
-      print(melee_state.get_state(gamestate, 1, 2)[-7:-1])
-      
+      #print(melee_input.get_state(gamestate, 1, 2))
+      melee_output.tensor_to_controller(controller,
+                                        random.uniform(-1,1),
+                                        random.uniform(-1,1),
+                                        [random.random() for _ in range(10)])
       
 
     else:
