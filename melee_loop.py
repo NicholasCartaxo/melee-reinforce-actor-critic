@@ -2,20 +2,22 @@
 import signal
 import sys
 import melee
-import melee_input
-import melee_output
-import random
-import numpy as np
+from melee_input import get_state
+from melee_output import tensor_to_controller
+from melee_reward import calculate_reward
 from melee_actor_critic import ActorCriticMelee
-from melee_actor_critic import calculate_reward
 from melee_actor_critic import train_step
-import time
 import torch
+from dotenv import load_dotenv
+import os
+
 
 def main():
 
-  exi = "/home/nicholascartaxo/Slippi/exi-ai/Binaries/dolphin-emu"
-  mainline = "C:/Users/messi/AppData/Roaming/Slippi Launcher/netplay/Slippi Dolphin.exe"
+  load_dotenv()
+  
+  exi = os.getenv("EXI_PATH")
+  mainline = os.getenv("MAINLINE_PATH")
   # Create our Console object.
   #   This will be one of the primary objects that we will interface with.
   #   The Console represents the virtual or hardware system Melee is playing on.
@@ -57,7 +59,7 @@ def main():
   signal.signal(signal.SIGINT, signal_handler)
 
   # Run the console
-  console.run(iso_path="C:/Users/messi/Documents/IA/SSBM.iso")
+  console.run(iso_path=os.getenv("ISO_PATH"))
 
   # Connect to the console
   print("Connecting to console...")
@@ -95,93 +97,54 @@ def main():
     gamestate = console.step()
 
     if gamestate is None:
-        continue
+      continue
 
 
     if gamestate.menu_state == melee.Menu.IN_GAME:
-        in_game_flag = True
+      in_game_flag = True
 
-        state_vec = melee_input.get_state(
-            gamestate,
-            1,
-            2
-        )
+      state_vec = get_state(gamestate,1,2)
 
-        state_tensor = torch.FloatTensor(
-            state_vec
-        )
+      state_tensor = torch.FloatTensor(state_vec)
 
+      action_idx, log_prob, entropy, value = model.select_action(state_tensor)
 
-     
-        action_idx, log_prob, entropy, value = model.select_action(
-            state_tensor
-        )
-
-
-    
-        melee_output.tensor_to_controller(
-            controller,
-            action_idx.item()
-        )
-
+      tensor_to_controller(controller,action_idx.item())
 
         
-        next_gamestate = console.step()
-        done = False
-        if next_gamestate is None:
-            continue
+      next_gamestate = console.step()
+      done = False
+      if next_gamestate is None:
+        continue
 
-        if next_gamestate.menu_state not in [
-            melee.Menu.IN_GAME,
-            melee.Menu.SUDDEN_DEATH
-        ]:
-            done = True
-            next_state_tensor = state_tensor
-        else:
-            next_state_vec = melee_input.get_state(
-                next_gamestate,
-                1,
-                2
-            )
+      if next_gamestate.menu_state not in [melee.Menu.IN_GAME, melee.Menu.SUDDEN_DEATH]:
+        done = True
+        next_state_tensor = state_tensor
+      else:
+        next_state_vec = get_state(next_gamestate,1,2)
 
-            next_state_tensor = torch.FloatTensor(
-                next_state_vec
-            )
+        next_state_tensor = torch.FloatTensor(next_state_vec)
 
+      reward = calculate_reward(gamestate,next_gamestate,1,2)
+      episode_reward += reward
 
-        # Reward
-        reward = calculate_reward(
-            gamestate,
-            next_gamestate,
-            1,
-            2
-        )
-        episode_reward += reward
+      experiences.append((
+        state_tensor,
+        action_idx,
+        log_prob,
+        reward,
+        value,
+        entropy,
+        next_state_tensor,
+        done
+      ))
 
 
-        experiences.append(
-            (
-                state_tensor,
-                action_idx,
-                log_prob,
-                reward,
-                value,
-                entropy,
-                next_state_tensor,
-                done
-            )
-        )
+      if len(experiences) >= N_STEPS or done:
 
-
-        if len(experiences) >= N_STEPS or done:
-
-            metrics = train_step(
-                model,
-                optimizer,
-                experiences
-            )
-            print(metrics)
-            experiences = []
+        metrics = train_step(model,optimizer,experiences)
+        print(metrics)
+        experiences = []
 
 
     else:
@@ -195,12 +158,12 @@ def main():
         gamestate=gamestate,
         controller=cpuController,
         character_selected=melee.Character.FOX,
-        stage_selected=melee.Stage.POKEMON_STADIUM,
+        stage_selected=melee.Stage.BATTLEFIELD,
         cpu_level=9,
         autostart=True)
+        
       print(f'Episode {c} reward: {episode_reward}')
       if in_game_flag:
-        time.sleep(5)
         c += 1
         in_game_flag = False
         episode_reward = 0
