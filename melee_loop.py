@@ -6,11 +6,16 @@ import melee_input
 import melee_output
 import random
 import numpy as np
+from melee_actor_critic import ActorCriticMelee
+from melee_actor_critic import calculate_reward
+from melee_actor_critic import train_step
+import time
+import torch
 
 def main():
 
   exi = "/home/nicholascartaxo/Slippi/exi-ai/Binaries/dolphin-emu"
-  mainline = "/home/nicholascartaxo/Slippi/mainline/Binaries/dolphin-emu-nogui"
+  mainline = "C:/Users/messi/AppData/Roaming/Slippi Launcher/netplay/Slippi Dolphin.exe"
   # Create our Console object.
   #   This will be one of the primary objects that we will interface with.
   #   The Console represents the virtual or hardware system Melee is playing on.
@@ -18,7 +23,7 @@ def main():
   #     bot can actually "see" what's happening in the game
   console = melee.Console(
     path=mainline,
-    fullscreen=True,
+    fullscreen=False,
     save_replays=False,
     enable_ffw=False,
     use_exi_inputs=False
@@ -52,7 +57,7 @@ def main():
   signal.signal(signal.SIGINT, signal_handler)
 
   # Run the console
-  console.run(iso_path="/home/nicholascartaxo/melee.iso")
+  console.run(iso_path="C:/Users/messi/Documents/IA/SSBM.iso")
 
   # Connect to the console
   print("Connecting to console...")
@@ -74,23 +79,110 @@ def main():
 
   menu_helper = melee.MenuHelper()
 
-  a = True
+  ALPHA = 1e-4      # Learning rate
+  N_STEPS = 20      # steps
 
+  #Model configuration
+  episode_reward = 0
+  model = ActorCriticMelee(input_dim=719, num_actions=10)
+  optimizer = torch.optim.Adam(model.parameters(), lr=ALPHA)
+  experiences = []
+  c = 0
+  in_game_flag = True
   # Main loop
   while True:
-    # "step" to the next frame
-    gamestate = console.step()
-    if gamestate is None:
-      continue
 
-    # What menu are we in?
-    if gamestate.menu_state in [melee.Menu.IN_GAME, melee.Menu.SUDDEN_DEATH]:
-      #print(melee_input.get_state(gamestate, 1, 2))
-      melee_output.tensor_to_controller(controller,
-                                        random.uniform(-1,1),
-                                        random.uniform(-1,1),
-                                        [random.random() for _ in range(10)])
-      
+    gamestate = console.step()
+
+    if gamestate is None:
+        continue
+
+
+    if gamestate.menu_state == melee.Menu.IN_GAME:
+        in_game_flag = True
+
+        state_vec = melee_input.get_state(
+            gamestate,
+            1,
+            2
+        )
+
+        state_tensor = torch.FloatTensor(
+            state_vec
+        )
+
+
+     
+        action_idx, log_prob, entropy, value = model.select_action(
+            state_tensor
+        )
+
+
+    
+        melee_output.tensor_to_controller(
+            controller,
+            action_idx.item()
+        )
+
+
+        
+        next_gamestate = console.step()
+        done = False
+        if next_gamestate is None:
+            continue
+
+        if next_gamestate.menu_state not in [
+            melee.Menu.IN_GAME,
+            melee.Menu.SUDDEN_DEATH
+        ]:
+            done = True
+            next_state_tensor = state_tensor
+        else:
+            next_state_vec = melee_input.get_state(
+                next_gamestate,
+                1,
+                2
+            )
+
+            next_state_tensor = torch.FloatTensor(
+                next_state_vec
+            )
+
+
+        # Reward
+        reward = calculate_reward(
+            gamestate,
+            next_gamestate,
+            1,
+            2
+        )
+        episode_reward += reward
+
+
+        experiences.append(
+            (
+                state_tensor,
+                action_idx,
+                log_prob,
+                reward,
+                value,
+                entropy,
+                next_state_tensor,
+                done
+            )
+        )
+
+
+        if len(experiences) >= N_STEPS or done:
+
+            metrics = train_step(
+                model,
+                optimizer,
+                experiences
+            )
+            print(metrics)
+            experiences = []
+
 
     else:
       menu_helper.menu_helper_simple(
@@ -98,7 +190,7 @@ def main():
         controller=controller,
         character_selected=melee.Character.LUIGI,
         stage_selected=melee.Stage.BATTLEFIELD)
-      
+
       menu_helper.menu_helper_simple(
         gamestate=gamestate,
         controller=cpuController,
@@ -106,6 +198,13 @@ def main():
         stage_selected=melee.Stage.POKEMON_STADIUM,
         cpu_level=9,
         autostart=True)
+      print(f'Episode {c} reward: {episode_reward}')
+      if in_game_flag:
+        time.sleep(5)
+        c += 1
+        in_game_flag = False
+        episode_reward = 0
+
       
 if __name__ == "__main__":
   main()
