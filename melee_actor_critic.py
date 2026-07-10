@@ -5,10 +5,10 @@ import torch.nn.functional as F
 
 GAMMA = 0.99     # Desconto 
 H_SCALE = 0.01    # Escala de entropia para evitar determinismo 
-ALPHA = 0.01
+
 
 class LeakySoftplus(nn.Module):
-
+    ALPHA = 0.01
     def forward(self, x):
         return torch.logsumexp(
             torch.stack([self.ALPHA * x, x], dim=0),
