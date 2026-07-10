@@ -15,14 +15,12 @@ ACTIONS = [
 
 def tensor_to_controller(controller: melee.Controller, 
              stick_x: float, 
-             stick_y: float, 
+             stick_y: float,
              action_idx: int):
 
   controller.release_all()
 
-  mapped_x = (stick_x + 1.0) / 2.0
-  mapped_y = (stick_y + 1.0) / 2.0
-  controller.tilt_analog(melee.Button.BUTTON_MAIN, mapped_x, mapped_y)
+  controller.tilt_analog(melee.Button.BUTTON_MAIN, stick_x, stick_y)
 
   action = ACTIONS[action_idx]
   if isinstance(action, melee.Button):

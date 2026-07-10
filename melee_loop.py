@@ -28,7 +28,9 @@ def main():
     fullscreen=False,
     save_replays=False,
     enable_ffw=False,
-    use_exi_inputs=False
+    use_exi_inputs=False,
+    disable_audio=True,
+    emulation_speed=0
   )
 
   # Create our Controller object
@@ -89,7 +91,7 @@ def main():
   model = ActorCriticMelee(input_dim=719, num_actions=10)
   optimizer = torch.optim.Adam(model.parameters(), lr=ALPHA)
   experiences = []
-  c = 0
+  ep = 0
   in_game_flag = True
   # Main loop
   while True:
@@ -107,11 +109,15 @@ def main():
 
       state_tensor = torch.FloatTensor(state_vec)
 
-      action_idx, log_prob, entropy, value = model.select_action(state_tensor)
+      action_discrete, action_continuous, log_prob, entropy, value = model.select_action(state_tensor)
 
-      tensor_to_controller(controller,action_idx.item())
+      action_idx = action_discrete.item()
+      stick_x = action_continuous[0].item()
+      stick_y = action_continuous[1].item()
 
-        
+      tensor_to_controller(controller,stick_x,stick_y,action_idx)
+
+
       next_gamestate = console.step()
       done = False
       if next_gamestate is None:
@@ -139,7 +145,6 @@ def main():
         done
       ))
 
-
       if len(experiences) >= N_STEPS or done:
 
         metrics = train_step(model,optimizer,experiences)
@@ -162,9 +167,9 @@ def main():
         cpu_level=9,
         autostart=True)
         
-      print(f'Episode {c} reward: {episode_reward}')
       if in_game_flag:
-        c += 1
+        print(f'Episode {ep} reward: {episode_reward}')
+        ep += 1
         in_game_flag = False
         episode_reward = 0
 
