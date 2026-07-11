@@ -83,8 +83,6 @@ def one_hot(val: int, num_classes: int) -> list:
   vec = [0.0] * num_classes
   if 0 <= val < num_classes:
     vec[val] = 1.0
-  else:
-    raise RuntimeError("val cannot be " + val)
   return vec
 
 def player_features(player: melee.PlayerState) -> list:
@@ -129,7 +127,7 @@ def player_features(player: melee.PlayerState) -> list:
 def get_state(gamestate: melee.GameState, botPort: int, enemyPort: int) -> np.ndarray:
   if gamestate.menu_state not in [melee.Menu.IN_GAME, melee.Menu.SUDDEN_DEATH]:
     raise RuntimeError("Current state not in game")
-  
+
   if botPort not in gamestate.players.keys():
     raise RuntimeError("Bot player not connected")
   

@@ -28,3 +28,5 @@ def tensor_to_controller(controller: melee.Controller,
   elif isinstance(action, tuple):
     c_x, c_y = action
     controller.tilt_analog(melee.Button.BUTTON_C, c_x, c_y)
+    
+  controller.flush()
