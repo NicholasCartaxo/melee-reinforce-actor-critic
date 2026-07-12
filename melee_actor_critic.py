@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.distributions import Categorical, Normal
+from torch.distributions import Categorical, Beta
 
 GAMMA = 0.99     # Desconto 
 H_SCALE = 0.01    # Escala de entropia para evitar determinismo 
@@ -29,11 +29,9 @@ class ActorCriticMelee(nn.Module):
     
     #Valores do analógico esquerdo
     self.actor_continuous = nn.Sequential(
-      nn.Linear(128, 2),
+      nn.Linear(128, 4),
       nn.Sigmoid() #libmelee exige valores entre 0 e 1 para analógicos
     )
-    self.actor_continuous_logstd = nn.Parameter(torch.zeros(2))
-    self.actor = nn.Linear(128, num_actions) # Saída de 10 ações
     self.critic = nn.Linear(128, 1)          # Saída do valor de estado V(s)
 
   def forward(self, x):
@@ -41,31 +39,29 @@ class ActorCriticMelee(nn.Module):
     
     probs = F.softmax(self.actor_discrete(x), dim=-1)
     
-    continuous = self.actor_continuous(x)
-    continuous_std = self.actor_continuous_logstd.exp().expand_as(continuous)
-    
+    ab = F.softplus(self.actor_continuous(x)) 
+    ab = torch.clamp(ab, min=1e-3, max=50.0)
+    alpha, beta = ab.chunk(2, dim=-1)
+
     value = self.critic(x)
-    return probs, continuous, continuous_std, value
+    return probs, alpha, beta, value
     
   def select_action(self, state):
-    probs, continuous, continuous_std, value = self(state)
+    probs, alpha, beta, value = self(state)
 
     dist_discrete = Categorical(probs)
     action_discrete = dist_discrete.sample()
     
-    dist_continuous = Normal(continuous, continuous_std)
+    dist_continuous = Beta(alpha, beta)
     action_continuous = dist_continuous.sample()
     
-    # Garantir que os valores estão entre 0 e 1
-    action_continuous_env = torch.clamp(action_continuous, 0.0, 1.0)
-
     log_prob_discrete = dist_discrete.log_prob(action_discrete)
     log_prob_continuous = dist_continuous.log_prob(action_continuous).sum(dim=-1)
     
     total_log_prob = log_prob_discrete + log_prob_continuous
     total_entropy = dist_discrete.entropy() + dist_continuous.entropy().sum(dim=-1)
 
-    return action_discrete, action_continuous_env, total_log_prob, total_entropy, value
+    return action_discrete, action_continuous, total_log_prob, total_entropy, value
 
 def train_step(model, optimizer, experiences):
   """
@@ -114,6 +110,8 @@ def train_step(model, optimizer, experiences):
   returns = torch.stack(returns)
 
   advantage = (returns - values.detach())
+  if len(advantage) > 1:
+    advantage = (advantage - advantage.mean()) / (advantage.std(unbiased=False) + 1e-8)
 
   actor_loss = -(log_probs * advantage).mean()
 

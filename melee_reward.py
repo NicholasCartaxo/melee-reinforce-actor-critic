@@ -33,6 +33,6 @@ def calculate_reward(prev_gs: melee.GameState, curr_gs: melee.GameState, port: i
   damage_dealt = 0.0 if enemy_lost_stock else max(0.0, enemy.percent - prev_enemy.percent)
   damage_taken = 0.0 if player_lost_stock else max(0.0, player.percent - prev_player.percent)
 
-  reward += 0.01 * (damage_dealt - damage_taken)
+  reward += 0.005 * (damage_dealt - damage_taken)
 
   return reward

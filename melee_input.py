@@ -62,6 +62,17 @@ COMPETITIVE_ACTIONS = [a for a in melee.Action if a not in NON_COMPETITIVE_STATE
 ACTION_TO_INDEX_MAP = {action: idx for idx, action in enumerate(COMPETITIVE_ACTIONS)}
 NUM_ACTIONS = len(COMPETITIVE_ACTIONS)
 
+left_x, right_x, upper_y, lower_y = (0,0,0,0)
+
+
+framedata = melee.FrameData()
+
+def norm_speed(speed):
+  return max(-1.0, min(1.0, float(speed) / 5))
+
+def norm_frames(frame):
+  return max(-1.0, min(1.0, float(frame) / 60))
+
 def action_index(action: melee.Action) -> int:
   return ACTION_TO_INDEX_MAP.get(action,-1)
 
@@ -98,33 +109,38 @@ def player_features(player: melee.PlayerState) -> list:
     NUM_ATTACK_STATES
   )
   
+  max_frames = framedata.frame_count(player.character, player.action)
+  action_progress = float(player.action_frame) / max_frames if max_frames > 0 else 0.0
+  can_iasa = 1.0 if (player.iasa > 0 and player.action_frame >= player.iasa) else 0.0
+
   continuous_features = [
-    float(player.position.x),
-    float(player.position.y),
-    float(player.percent),
-    float(player.shield_strength),
+    float(player.position.x)/abs(left_x),
+    float(player.position.y)/abs(upper_y),
+    min(1.0,float(player.percent)/200),
+    float(player.shield_strength)/60,
     float(player.is_powershield),
     float(player.facing),
-    float(player.action_frame),
+    action_progress,
     float(player.invulnerable),
-    float(player.invulnerability_left),
-    float(player.hitlag_left),
-    float(player.hitstun_frames_left),
-    float(player.jumps_left),
+    norm_frames(float(player.invulnerability_left)),
+    norm_frames(float(player.hitlag_left)),
+    norm_frames(float(player.hitstun_frames_left)),
+    float(player.jumps_left)/framedata.max_jumps(player.character),
     float(player.on_ground),
-    float(player.speed_air_x_self),
-    float(player.speed_y_self),
-    float(player.speed_x_attack),
-    float(player.speed_y_attack),
-    float(player.speed_ground_x_self),
+    norm_speed(float(player.speed_air_x_self)),
+    norm_speed(float(player.speed_y_self)),
+    norm_speed(float(player.speed_x_attack)),
+    norm_speed(float(player.speed_y_attack)),
+    norm_speed(float(player.speed_ground_x_self)),
     float(player.off_stage),
-    float(player.iasa),
+    can_iasa,
   ]
   
   return char_list + action_list + attack_state_list + continuous_features
 
 
 def get_state(gamestate: melee.GameState, botPort: int, enemyPort: int) -> np.ndarray:
+  global left_x, right_x, upper_y, lower_y
   if gamestate.menu_state not in [melee.Menu.IN_GAME, melee.Menu.SUDDEN_DEATH]:
     raise RuntimeError("Current state not in game")
 
@@ -134,11 +150,19 @@ def get_state(gamestate: melee.GameState, botPort: int, enemyPort: int) -> np.nd
   if enemyPort not in gamestate.players.keys():
     raise RuntimeError("Enemy player not connected")
   
-  bot_features = player_features(gamestate.players[botPort])
-  enemy_features = player_features(gamestate.players[enemyPort])
+  left_x, right_x, upper_y, lower_y = melee.BLASTZONES[gamestate.stage]
+
+  bot = gamestate.players[botPort]
+  enemy = gamestate.players[enemyPort]
+
+  bot_features = player_features(bot)
+  enemy_features = player_features(enemy)
+
+  dx = (enemy.position.x - bot.position.x) / (abs(left_x) * 2)
+  dy = (enemy.position.y - bot.position.y) / (abs(upper_y) * 2)
 
   stage_list = one_hot(stage_index(gamestate.stage), NUM_STAGES)
-  general_features = stage_list + [gamestate.distance]
+  general_features = stage_list + [dx, dy]
 
   mlp_input = np.array(bot_features + enemy_features + general_features, dtype=np.float32)
   

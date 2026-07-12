@@ -86,14 +86,34 @@ def main():
   ALPHA = 1e-4      # Learning rate
   N_STEPS = 20      # steps
 
+  os.makedirs("saved_models", exist_ok=True)
+
   #Model configuration
   episode_reward = 0
-  model = ActorCriticMelee(input_dim=719, num_actions=10)
+  model = ActorCriticMelee(input_dim=720, num_actions=10)
   optimizer = torch.optim.Adam(model.parameters(), lr=ALPHA)
   experiences = []
-  ep = 0
-  in_game_flag = True
+  ep = 1
+  in_game_flag = False
   
+  best_reward = float('-inf')
+  episode_metrics_list = []
+  best_model_path = "saved_models/model_best.pt"
+
+  if os.path.exists(best_model_path):
+      print(f"Found existing best model at {best_model_path}. Loading...")
+      checkpoint = torch.load(best_model_path, weights_only=False)
+      
+      best_reward = checkpoint.get('episode_reward', float('-inf'))
+      print(f"Previous best reward: {best_reward}")
+      
+      model.load_state_dict(checkpoint['model_state_dict'])
+      optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+      
+      ep = checkpoint.get('episode', 0) + 1
+  else:
+      print("No previous best model found. Starting fresh.")
+
   prev_gamestate = None
   prev_state_tensor = None
   prev_action_idx = None
@@ -139,7 +159,7 @@ def main():
       
         if len(experiences) >= N_STEPS:
           metrics = train_step(model,optimizer,experiences)
-          print(metrics)
+          episode_metrics_list.append(metrics)
           experiences = []
       
       
@@ -183,7 +203,7 @@ def main():
         
         if len(experiences) > 0:
           metrics = train_step(model, optimizer, experiences)
-          print(metrics)
+          episode_metrics_list.append(metrics)
           experiences = []
           
         prev_gamestate = None
@@ -212,9 +232,36 @@ def main():
         
       if in_game_flag:
         print(f'Episode {ep} reward: {episode_reward}')
+        
+        avg_metrics = {}
+        if episode_metrics_list:
+            for key in episode_metrics_list[0].keys():
+                avg_metrics[key] = sum(m[key] for m in episode_metrics_list) / len(episode_metrics_list)
+            print(f'Episode {ep} average metrics: {avg_metrics}')
+
+        checkpoint = {
+            'episode': ep,
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'episode_reward': episode_reward,
+            'avg_metrics': avg_metrics
+        }
+
+        if ep > 0 and ep % 50 == 0:
+            save_path = f"saved_models/model_ep{ep}.pt"
+            torch.save(checkpoint, save_path)
+            print(f"Saved periodic checkpoint: {save_path}")
+
+        if episode_reward > best_reward:
+            best_reward = episode_reward
+            save_path = "saved_models/model_best.pt"
+            torch.save(checkpoint, save_path)
+            print(f"*** New best model saved! Reward: {best_reward:.2f} ***")
+
         ep += 1
         in_game_flag = False
         episode_reward = 0
+        episode_metrics_list = []
 
       
 if __name__ == "__main__":
