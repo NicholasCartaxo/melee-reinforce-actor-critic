@@ -1,4 +1,3 @@
-#!/usr/bin/python3
 import signal
 import sys
 import melee
@@ -120,7 +119,7 @@ def main():
   prev_log_prob = None
   prev_value = None
   prev_entropy = None
-  
+  rewards = []
   t = time.time()
   
   # Main loop
@@ -135,7 +134,6 @@ def main():
       
       if agent_port not in gamestate.players or enemy_port not in gamestate.players:
         continue
-      
       in_game_flag = True
 
       state_vec = get_state(gamestate,agent_port,enemy_port)
@@ -156,7 +154,6 @@ def main():
           state_tensor,
           False # done = False
         ))
-      
         if len(experiences) >= N_STEPS:
           metrics = train_step(model,optimizer,experiences)
           episode_metrics_list.append(metrics)
@@ -232,7 +229,9 @@ def main():
         
       if in_game_flag:
         print(f'Episode {ep} reward: {episode_reward}')
-        
+        rewards.append(episode_reward)
+        print("Average reward: ", sum(rewards)/len(rewards))
+        print("Last 10 rewards: ", rewards[-10:])
         avg_metrics = {}
         if episode_metrics_list:
             for key in episode_metrics_list[0].keys():
