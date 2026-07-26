@@ -1,267 +1,237 @@
 import signal
 import sys
+import os
+import time
+import torch
 import melee
+from dotenv import load_dotenv
+
 from melee_input import get_state
 from melee_output import tensor_to_controller
 from melee_reward import calculate_reward
-from melee_actor_critic import ActorCriticMelee
-from melee_actor_critic import train_step
-import torch
-from dotenv import load_dotenv
-import os
-import time
+from melee_actor_critic import ActorCriticMelee, train_step
+
+# Configurações do Frame Skip e RL
+FRAME_SKIP = 4    # Repete a mesma ação por 4 frames (15 tomadas de decisão/s)
+N_STEPS = 256
+ALPHA = 1e-4
 
 def main():
+    load_dotenv()
+    
+    console = melee.Console(
+        path=os.getenv("MAINLINE_PATH"),
+        fullscreen=False,
+        save_replays=False,
+        disable_audio=True,
+        emulation_speed=0,
+        gfx_backend="Null",
+    )
 
-  load_dotenv()
-  
-  # Create our Console object.
-  #   This will be one of the primary objects that we will interface with.
-  #   The Console represents the virtual or hardware system Melee is playing on.
-  #   Through this object, we can get "GameState" objects per-frame so that your
-  #     bot can actually "see" what's happening in the game
-  console = melee.Console(
-    path=os.getenv("MAINLINE_PATH"),
-    fullscreen=False,
-    save_replays=False,
-    disable_audio=True,
-    emulation_speed=0,
-    gfx_backend="Null",
-  )
+    agent_port = 1
+    enemy_port = 4
 
-  # Create our Controller object
-  #   The controller is the second primary object your bot will interact with
-  #   Your controller is your way of sending button presses to the game, whether
-  #   virtual or physical.
+    controller = melee.Controller(console=console, port=agent_port, type=melee.ControllerType.STANDARD)
+    cpuController = melee.Controller(console=console, port=enemy_port, type=melee.ControllerType.STANDARD)
+    controllers = [controller, cpuController]
 
-  agent_port = 1
-  enemy_port = 4
+    def signal_handler(sig, frame):
+        controller.disconnect()
+        cpuController.disconnect()
+        console.stop()
+        sys.exit(0)
 
-  controller = melee.Controller(
-    console=console,
-    port=agent_port,
-    type=melee.ControllerType.STANDARD)
-  
-  cpuController = melee.Controller(
-    console=console,
-    port=enemy_port,
-    type=melee.ControllerType.STANDARD
-  )
+    signal.signal(signal.SIGINT, signal_handler)
 
-  controllers = [controller,cpuController]
+    console.run(iso_path=os.getenv("ISO_PATH"))
+    print("Connecting to console...")
+    if not console.connect():
+        sys.exit(-1)
 
-  # This isn't necessary, but makes it so that Dolphin will get killed when you ^C
-  def signal_handler(sig, frame):
-    controller.disconnect()
-    cpuController.disconnect()
-    console.stop()
-    sys.exit(0)
+    for c in controllers:
+        if not c.connect():
+            sys.exit(-1)
 
-  signal.signal(signal.SIGINT, signal_handler)
+    menu_helper = melee.MenuHelper()
+    os.makedirs("saved_models", exist_ok=True)
 
-  # Run the console
-  console.run(iso_path=os.getenv("ISO_PATH"))
+    model = ActorCriticMelee(input_dim=720, num_actions=10)
 
-  # Connect to the console
-  print("Connecting to console...")
-  if not console.connect():
-    print("ERROR: Failed to connect to the console.")
-    sys.exit(-1)
-  print("Console connected")
+    optimizer = torch.optim.Adam(model.parameters(), lr=ALPHA)
 
-  # Plug our controller in
-  #   Due to how named pipes work, this has to come AFTER running dolphin
-  #   NOTE: If you're loading a movie file, don't connect the controller,
-  #   dolphin will hang waiting for input and never receive it
-  print("Connecting controller to console...")
-  for c in controllers:
-    if not c.connect():
-      print("ERROR: Failed to connect the controller.")
-      sys.exit(-1)
-    print("Controller connected")
+    best_model_path = "saved_models/model_best.pt"
+    ep = 1
+    best_reward = float('-inf')
 
-  menu_helper = melee.MenuHelper()
+    if os.path.exists(best_model_path):
+        print(f"Loading checkpoint from {best_model_path}...")
+        checkpoint = torch.load(best_model_path, weights_only=False)
+        best_reward = float('-inf')
+        model.load_state_dict(checkpoint['model_state_dict'])
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        ep = checkpoint.get('episode', 0) + 1
 
-  ALPHA = 1e-4      # Learning rate
-  N_STEPS = 20      # steps
+    # Variáveis de Controle do Loop
+    experiences = []
+    episode_reward = 0
+    rewards_history = []
+    episode_metrics_list = []
+    in_game_flag = False
+    
+    # Controle de Frame Skip
+    frame_skip_counter = 0
+    accumulated_skip_reward = 0.0
+    
+    # Registros do estado inicial do Macro-Step e do Estado Anterior
+    macro_start_state = None
+    macro_action_idx = None
+    macro_action_cont = None
+    prev_state_tensor = None  # 👈 1. INICIALIZADO AQUI
 
-  os.makedirs("saved_models", exist_ok=True)
+    prev_gamestate = None
+    t0 = time.time()
 
-  #Model configuration
-  episode_reward = 0
-  model = ActorCriticMelee(input_dim=720, num_actions=10)
-  optimizer = torch.optim.Adam(model.parameters(), lr=ALPHA)
-  experiences = []
-  ep = 1
-  in_game_flag = False
-  
-  best_reward = float('-inf')
-  episode_metrics_list = []
-  best_model_path = "saved_models/model_best.pt"
+    while True:
+        gamestate = console.step()
+        if gamestate is None:
+            continue
 
-  if os.path.exists(best_model_path):
-      print(f"Found existing best model at {best_model_path}. Loading...")
-      checkpoint = torch.load(best_model_path, weights_only=False)
-      
-      best_reward = checkpoint.get('episode_reward', float('-inf'))
-      print(f"Previous best reward: {best_reward}")
-      
-      model.load_state_dict(checkpoint['model_state_dict'])
-      optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-      
-      ep = checkpoint.get('episode', 0) + 1
-  else:
-      print("No previous best model found. Starting fresh.")
+        if gamestate.menu_state in [melee.Menu.IN_GAME, melee.Menu.SUDDEN_DEATH]:
+            if agent_port not in gamestate.players or enemy_port not in gamestate.players:
+                continue
 
-  prev_gamestate = None
-  prev_state_tensor = None
-  prev_action_idx = None
-  prev_log_prob = None
-  prev_value = None
-  prev_entropy = None
-  rewards = []
-  t = time.time()
-  
-  # Main loop
-  while True:
+            in_game_flag = True
+            state_vec = get_state(gamestate, agent_port, enemy_port)
+            state_tensor = torch.FloatTensor(state_vec)
 
-    gamestate = console.step()
+            # -------------------------------------------------------------
+            # 1. INÍCIO DO MACRO-STEP: Amostra uma nova ação sem gradiente
+            # -------------------------------------------------------------
+            if frame_skip_counter == 0:
+                macro_start_state = state_tensor
 
-    if gamestate is None:
-      continue
+                with torch.no_grad():
+                    action_discrete, action_continuous = model.select_action(state_tensor)
+                
+                macro_action_idx = action_discrete.item()
+                macro_action_cont = action_continuous
 
-    if gamestate.menu_state in [melee.Menu.IN_GAME, melee.Menu.SUDDEN_DEATH]:
-      
-      if agent_port not in gamestate.players or enemy_port not in gamestate.players:
-        continue
-      in_game_flag = True
+            # -------------------------------------------------------------
+            # 2. EXECUÇÃO DA AÇÃO
+            # -------------------------------------------------------------
+            stick_x = macro_action_cont[0].item()
+            stick_y = macro_action_cont[1].item()
+            tensor_to_controller(controller, stick_x, stick_y, macro_action_idx)
 
-      state_vec = get_state(gamestate,agent_port,enemy_port)
+            # -------------------------------------------------------------
+            # 3. RECOMPENSA E ACÚMULO
+            # -------------------------------------------------------------
+            if prev_gamestate is not None:
+                reward = calculate_reward(prev_gamestate, gamestate, agent_port, enemy_port)
+                accumulated_skip_reward += reward
+                episode_reward += reward
 
-      state_tensor = torch.FloatTensor(state_vec)
+            frame_skip_counter += 1
+            prev_gamestate = gamestate
+            prev_state_tensor = state_tensor  # 👈 2. ATUALIZADO A CADA FRAME ATIVO
 
-      if prev_gamestate is not None:
-        reward = calculate_reward(prev_gamestate, gamestate, agent_port, enemy_port)
-        episode_reward += reward
+            # -------------------------------------------------------------
+            # 4. FIM DO MACRO-STEP: Armazena a transição de 4 frames
+            # -------------------------------------------------------------
+            if frame_skip_counter >= FRAME_SKIP:
+                experiences.append((
+                    macro_start_state,        # Estado no início dos 4 frames
+                    macro_action_idx,         # Ação discreta executada
+                    macro_action_cont,        # Ação contínua executada
+                    accumulated_skip_reward,  # Recompensa TOTAL acumulada
+                    False,                    # done = False
+                    state_tensor              # Estado final após os 4 frames
+                ))
 
-        experiences.append((
-          prev_state_tensor,
-          prev_action_idx,
-          prev_log_prob,
-          reward,
-          prev_value,
-          prev_entropy,
-          state_tensor,
-          False # done = False
-        ))
-        if len(experiences) >= N_STEPS:
-          metrics = train_step(model,optimizer,experiences)
-          episode_metrics_list.append(metrics)
-          experiences = []
-      
-      
-      action_discrete, action_continuous, log_prob, entropy, value = model.select_action(state_tensor)
+                frame_skip_counter = 0
+                accumulated_skip_reward = 0.0
 
-      action_idx = action_discrete.item()
-      stick_x = action_continuous[0].item()
-      stick_y = action_continuous[1].item()
+                if len(experiences) >= N_STEPS:
+                    metrics = train_step(model, optimizer, experiences)
+                    episode_metrics_list.append(metrics)
+                    experiences = []
 
-      tensor_to_controller(controller,stick_x,stick_y,action_idx)
-      
-      prev_gamestate = gamestate
-      prev_state_tensor = state_tensor
-      prev_action_idx = action_idx
-      prev_log_prob = log_prob
-      prev_value = value
-      prev_entropy = entropy
+        else:
+            # -------------------------------------------------------------
+            # TRATAMENTO DE FIM DE PARTIDA / MENUS
+            # -------------------------------------------------------------
+            if prev_gamestate is not None:
+                reward = calculate_reward(prev_gamestate, gamestate, agent_port, enemy_port)
+                accumulated_skip_reward += reward
+                episode_reward += reward
 
-      if gamestate.frame % 120 == 0:
-        d = time.time() - t
-        print("fps:",120/d)
-        t = time.time()
+                if macro_start_state is not None and prev_state_tensor is not None:
+                    experiences.append((
+                        macro_start_state,
+                        macro_action_idx,
+                        macro_action_cont,
+                        accumulated_skip_reward,
+                        True,               # done = True
+                        prev_state_tensor   # 👈 3. USADO AQUI COM SEGURANÇA
+                    ))
 
-    else:
-      
-      if prev_gamestate is not None:
-        
-        reward = calculate_reward(prev_gamestate, gamestate, agent_port, enemy_port)
-        episode_reward += reward
-        
-        experiences.append((
-          prev_state_tensor,
-          prev_action_idx,
-          prev_log_prob,
-          reward,
-          prev_value,
-          prev_entropy,
-          prev_state_tensor,
-          True # done = True
-        ))
-        
-        if len(experiences) > 0:
-          metrics = train_step(model, optimizer, experiences)
-          episode_metrics_list.append(metrics)
-          experiences = []
-          
-        prev_gamestate = None
-        prev_state_tensor = None
-      
+                if len(experiences) > 0:
+                    metrics = train_step(model, optimizer, experiences)
+                    episode_metrics_list.append(metrics)
+                    experiences = []
 
-      menu_helper.menu_helper_simple(
-        gamestate=gamestate,
-        controller=controller,
-        character_selected=melee.Character.LUIGI,
-        stage_selected=melee.Stage.BATTLEFIELD,
-        swag=False,
-        autostart=False)
+                prev_gamestate = None
+                prev_state_tensor = None
+                macro_start_state = None
+                frame_skip_counter = 0
+                accumulated_skip_reward = 0.0
 
-      menu_helper.menu_helper_simple(
-        gamestate=gamestate,
-        controller=cpuController,
-        character_selected=melee.Character.LUIGI,
-        stage_selected=melee.Stage.BATTLEFIELD,
-        cpu_level=9,
-        swag=False,
-        autostart=True)
-      
-      controller.flush()
-      cpuController.flush()
-        
-      if in_game_flag:
-        print(f'Episode {ep} reward: {episode_reward}')
-        rewards.append(episode_reward)
-        print("Average reward: ", sum(rewards)/len(rewards))
-        print("Last 10 rewards: ", rewards[-10:])
-        avg_metrics = {}
-        if episode_metrics_list:
-            for key in episode_metrics_list[0].keys():
-                avg_metrics[key] = sum(m[key] for m in episode_metrics_list) / len(episode_metrics_list)
-            print(f'Episode {ep} average metrics: {avg_metrics}')
+            # Gerenciamento dos menus
+            menu_helper.menu_helper_simple(
+                gamestate=gamestate, controller=controller,
+                character_selected=melee.Character.LUIGI,
+                stage_selected=melee.Stage.BATTLEFIELD,
+                swag=False, autostart=False
+            )
+            menu_helper.menu_helper_simple(
+                gamestate=gamestate, controller=cpuController,
+                character_selected=melee.Character.LUIGI,
+                stage_selected=melee.Stage.BATTLEFIELD,
+                cpu_level=3, swag=False, autostart=True
+            )
+            controller.flush()
+            cpuController.flush()
 
-        checkpoint = {
-            'episode': ep,
-            'model_state_dict': model.state_dict(),
-            'optimizer_state_dict': optimizer.state_dict(),
-            'episode_reward': episode_reward,
-            'avg_metrics': avg_metrics
-        }
+            if in_game_flag:
+                print(f"--- Fim do Episódio {ep} ---")
+                print(f"Recompensa do Episódio: {episode_reward:.2f}")
+                rewards_history.append(episode_reward)
+                print("Average Reward: ", sum(rewards_history)/len(rewards_history))
+                print("Average Reward (last 10): ", sum(rewards_history[-10:])/min(len(rewards_history), 10))
+                averege_reward_last_ten = sum(rewards_history[-10:])/min(len(rewards_history), 10)
+                avg_metrics = {}
+                if episode_metrics_list:
+                    for k in episode_metrics_list[0].keys():
+                        avg_metrics[k] = sum(m[k] for m in episode_metrics_list) / len(episode_metrics_list)
+                    print(f"Métricas Médias do Episódio: {avg_metrics}")
 
-        if ep > 0 and ep % 50 == 0:
-            save_path = f"saved_models/model_ep{ep}.pt"
-            torch.save(checkpoint, save_path)
-            print(f"Saved periodic checkpoint: {save_path}")
+                checkpoint = {
+                    'episode': ep,
+                    'model_state_dict': model.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'episode_reward': episode_reward,
+                    'avg_metrics': avg_metrics
+                }
 
-        if episode_reward > best_reward:
-            best_reward = episode_reward
-            save_path = "saved_models/model_best.pt"
-            torch.save(checkpoint, save_path)
-            print(f"*** New best model saved! Reward: {best_reward:.2f} ***")
+                if averege_reward_last_ten > best_reward and len(rewards_history) > 9:
+                    best_reward = averege_reward_last_ten
+                    torch.save(checkpoint, "saved_models/model_best.pt")
+                    print(f"*** Novo modelo salvo! Recompensa: {best_reward:.2f} ***")
 
-        ep += 1
-        in_game_flag = False
-        episode_reward = 0
-        episode_metrics_list = []
+                ep += 1
+                in_game_flag = False
+                episode_reward = 0
+                episode_metrics_list = []
 
-      
 if __name__ == "__main__":
-  main()
+    main()
