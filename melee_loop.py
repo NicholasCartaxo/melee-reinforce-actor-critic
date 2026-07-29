@@ -1,9 +1,11 @@
 import signal
 import sys
 import os
-import time
 import torch
 import melee
+import csv
+import glob
+import re
 from dotenv import load_dotenv
 
 from melee_input import get_state
@@ -15,6 +17,7 @@ from melee_actor_critic import ActorCriticMelee, train_step
 FRAME_SKIP = 2    # Repete a mesma ação por 2 frames (30 tomadas de decisão/s)
 N_STEPS = 256
 ALPHA = 1e-4
+CPU_LEVEL = 3
 
 def main():
     load_dotenv()
@@ -56,20 +59,39 @@ def main():
     os.makedirs("saved_models", exist_ok=True)
 
     model = ActorCriticMelee(input_dim=720, num_actions=10)
-
     optimizer = torch.optim.Adam(model.parameters(), lr=ALPHA)
 
-    best_model_path = "saved_models/model_best.pt"
     ep = 1
     best_reward = float('-inf')
 
+    # Carregar best_reward a partir do model_best.pt
+    best_model_path = "saved_models/model_best.pt"
     if os.path.exists(best_model_path):
-        print(f"Loading checkpoint from {best_model_path}...")
-        checkpoint = torch.load(best_model_path, weights_only=False)
-        best_reward = float('-inf')
+        print(f"Loading best reward from {best_model_path}...")
+        best_checkpoint = torch.load(best_model_path, weights_only=False)
+        best_reward = best_checkpoint.get('best_reward', float('-inf'))
+        print(f"Current best average reward known: {best_reward:.2f}")
+
+    # Carregar o último modelo periódico para continuar o treinamento
+    model_files = glob.glob("saved_models/model_ep_*.pt")
+    latest_model_path = None
+    max_ep = 0
+    
+    for f in model_files:
+        match = re.search(r'model_ep_(\d+)\.pt', f)
+        if match:
+            ep_num = int(match.group(1))
+            if ep_num > max_ep:
+                max_ep = ep_num
+                latest_model_path = f
+
+    if latest_model_path and os.path.exists(latest_model_path):
+        print(f"Loading latest checkpoint to resume from {latest_model_path}...")
+        checkpoint = torch.load(latest_model_path, weights_only=False)
         model.load_state_dict(checkpoint['model_state_dict'])
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         ep = checkpoint.get('episode', 0) + 1
+        print(f"Resuming from episode {ep}")
 
     # Variáveis de Controle do Loop
     experiences = []
@@ -87,8 +109,23 @@ def main():
     macro_action_idx = None
     macro_action_cont = None
     prev_state_tensor = None
-
     prev_gamestate = None
+
+    # Inicialização do CSV geral
+    csv_filename = "training_logs.csv"
+    if not os.path.exists(csv_filename):
+        with open(csv_filename, 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(["Episode", "Reward", "Avg_Reward", "CPU_Level", "Agent_Stock", "CPU_Stock"])
+            
+    # Inicialização do CSV exclusivo para o melhor modelo
+    best_csv_filename = "best_models_log.csv"
+    if not os.path.exists(best_csv_filename):
+        with open(best_csv_filename, 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(["Episode", "Reward", "Best_Avg_Reward", "CPU_Level", "Agent_Stock", "CPU_Stock"])
+
+    logs_buffer = []
 
     while True:
         gamestate = console.step()
@@ -149,7 +186,15 @@ def main():
 
         else:
             # TRATAMENTO DE FIM / COMEÇO DE PARTIDA
+            agent_stock = 0
+            cpu_stock = 0
+
             if prev_gamestate is not None:
+                if agent_port in prev_gamestate.players:
+                    agent_stock = prev_gamestate.players[agent_port].stock
+                if enemy_port in prev_gamestate.players:
+                    cpu_stock = prev_gamestate.players[enemy_port].stock
+
                 reward = calculate_reward(prev_gamestate, gamestate, agent_port, enemy_port)
                 accumulated_skip_reward += reward
                 episode_reward += reward
@@ -186,7 +231,7 @@ def main():
                 gamestate=gamestate, controller=cpuController,
                 character_selected=melee.Character.LUIGI,
                 stage_selected=melee.Stage.BATTLEFIELD,
-                cpu_level=3, swag=False, autostart=True
+                cpu_level=CPU_LEVEL, swag=False, autostart=True
             )
             controller.flush()
             cpuController.flush()
@@ -194,28 +239,52 @@ def main():
             if in_game_flag:
                 print(f"--- Fim do Episódio {ep} ---")
                 print(f"Recompensa do Episódio: {episode_reward:.2f}")
+                print(f"Estoque Final - Agent: {agent_stock} | CPU: {cpu_stock}")
+                
                 rewards_history.append(episode_reward)
-                print("Average Reward: ", sum(rewards_history)/len(rewards_history))
-                print("Average Reward (last 10): ", sum(rewards_history[-10:])/min(len(rewards_history), 10))
-                averege_reward_last_ten = sum(rewards_history[-10:])/min(len(rewards_history), 10)
+                
+                avg_reward = sum(rewards_history)/len(rewards_history)
+                print("Average Reward: ", avg_reward)
+                
                 avg_metrics = {}
                 if episode_metrics_list:
                     for k in episode_metrics_list[0].keys():
                         avg_metrics[k] = sum(m[k] for m in episode_metrics_list) / len(episode_metrics_list)
                     print(f"Métricas Médias do Episódio: {avg_metrics}")
 
+                logs_buffer.append([ep, episode_reward, avg_reward, CPU_LEVEL, agent_stock, cpu_stock])
+
                 checkpoint = {
                     'episode': ep,
                     'model_state_dict': model.state_dict(),
                     'optimizer_state_dict': optimizer.state_dict(),
                     'episode_reward': episode_reward,
-                    'avg_metrics': avg_metrics
+                    'avg_metrics': avg_metrics,
+                    'best_reward': best_reward
                 }
 
-                if averege_reward_last_ten > best_reward and len(rewards_history) > 9:
-                    best_reward = averege_reward_last_ten
+                # Salva melhor modelo
+                if avg_reward > best_reward:
+                    best_reward = avg_reward
+                    checkpoint['best_reward'] = best_reward
                     torch.save(checkpoint, "saved_models/model_best.pt")
-                    print(f"*** Novo modelo salvo! Recompensa: {best_reward:.2f} ***")
+                    print(f"*** Novo melhor modelo salvo! Recompensa: {best_reward:.2f} ***")
+                    
+                    # Escreve log exclusivo para o modelo de melhor performance
+                    with open(best_csv_filename, 'a', newline='') as f:
+                        writer = csv.writer(f)
+                        writer.writerow([ep, episode_reward, best_reward, CPU_LEVEL, agent_stock, cpu_stock])
+
+                # Salva a cada 100 modelos
+                if ep % 100 == 0:
+                    torch.save(checkpoint, f"saved_models/model_ep_{ep}.pt")
+                    print(f"*** Checkpoint periódico salvo: model_ep_{ep}.pt ***")
+                    
+                    # Atualiza CSV geral
+                    with open(csv_filename, 'a', newline='') as f:
+                        writer = csv.writer(f)
+                        writer.writerows(logs_buffer)
+                    logs_buffer = []
 
                 ep += 1
                 in_game_flag = False
