@@ -12,7 +12,7 @@ from melee_reward import calculate_reward
 from melee_actor_critic import ActorCriticMelee, train_step
 
 # Configurações do Frame Skip e RL
-FRAME_SKIP = 4    # Repete a mesma ação por 4 frames (15 tomadas de decisão/s)
+FRAME_SKIP = 2    # Repete a mesma ação por 2 frames (30 tomadas de decisão/s)
 N_STEPS = 256
 ALPHA = 1e-4
 
@@ -86,10 +86,9 @@ def main():
     macro_start_state = None
     macro_action_idx = None
     macro_action_cont = None
-    prev_state_tensor = None  # 👈 1. INICIALIZADO AQUI
+    prev_state_tensor = None
 
     prev_gamestate = None
-    t0 = time.time()
 
     while True:
         gamestate = console.step()
@@ -104,9 +103,7 @@ def main():
             state_vec = get_state(gamestate, agent_port, enemy_port)
             state_tensor = torch.FloatTensor(state_vec)
 
-            # -------------------------------------------------------------
-            # 1. INÍCIO DO MACRO-STEP: Amostra uma nova ação sem gradiente
-            # -------------------------------------------------------------
+            # INÍCIO DO MACRO-STEP
             if frame_skip_counter == 0:
                 macro_start_state = state_tensor
 
@@ -116,16 +113,12 @@ def main():
                 macro_action_idx = action_discrete.item()
                 macro_action_cont = action_continuous
 
-            # -------------------------------------------------------------
-            # 2. EXECUÇÃO DA AÇÃO
-            # -------------------------------------------------------------
+            # EXECUÇÃO DA AÇÃO
             stick_x = macro_action_cont[0].item()
             stick_y = macro_action_cont[1].item()
             tensor_to_controller(controller, stick_x, stick_y, macro_action_idx)
 
-            # -------------------------------------------------------------
-            # 3. RECOMPENSA E ACÚMULO
-            # -------------------------------------------------------------
+            # RECOMPENSA E ACÚMULO
             if prev_gamestate is not None:
                 reward = calculate_reward(prev_gamestate, gamestate, agent_port, enemy_port)
                 accumulated_skip_reward += reward
@@ -133,19 +126,17 @@ def main():
 
             frame_skip_counter += 1
             prev_gamestate = gamestate
-            prev_state_tensor = state_tensor  # 👈 2. ATUALIZADO A CADA FRAME ATIVO
+            prev_state_tensor = state_tensor
 
-            # -------------------------------------------------------------
-            # 4. FIM DO MACRO-STEP: Armazena a transição de 4 frames
-            # -------------------------------------------------------------
+            # FIM DO MACRO-STEP: Armazena a transição de 2 frames
             if frame_skip_counter >= FRAME_SKIP:
                 experiences.append((
-                    macro_start_state,        # Estado no início dos 4 frames
+                    macro_start_state,        # Estado no início dos 2 frames
                     macro_action_idx,         # Ação discreta executada
                     macro_action_cont,        # Ação contínua executada
                     accumulated_skip_reward,  # Recompensa TOTAL acumulada
                     False,                    # done = False
-                    state_tensor              # Estado final após os 4 frames
+                    state_tensor              # Estado final após os 2 frames
                 ))
 
                 frame_skip_counter = 0
@@ -157,9 +148,7 @@ def main():
                     experiences = []
 
         else:
-            # -------------------------------------------------------------
-            # TRATAMENTO DE FIM DE PARTIDA / MENUS
-            # -------------------------------------------------------------
+            # TRATAMENTO DE FIM / COMEÇO DE PARTIDA
             if prev_gamestate is not None:
                 reward = calculate_reward(prev_gamestate, gamestate, agent_port, enemy_port)
                 accumulated_skip_reward += reward
@@ -172,7 +161,7 @@ def main():
                         macro_action_cont,
                         accumulated_skip_reward,
                         True,               # done = True
-                        prev_state_tensor   # 👈 3. USADO AQUI COM SEGURANÇA
+                        prev_state_tensor
                     ))
 
                 if len(experiences) > 0:
