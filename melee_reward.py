@@ -17,34 +17,41 @@ def calculate_reward(prev_gs: melee.GameState, curr_gs: melee.GameState, port: i
     enemy_lost_stock = enemy.stock < prev_enemy.stock
 
     if enemy_lost_stock:
-        reward += 10.0  # Grande recompensa por nocautear o oponente
+        reward += 5  # Grande recompensa por nocautear o oponente
 
     if player_lost_stock:
-        reward -= 10.0  # Grande penalidade por ser nocauteado
+        if prev_player.percent < 40.0:
+            reward -= 10.0  # Penalidade maior se morreu com porcentagem baixa 
+        else:
+            reward -= 5.0 # Grande penalidade por ser nocauteado
 
     # Cálculo de Dano Causado / Sofrido
     # Ignora discrepâncias de porcentagem quando ocorre troca de vida
     damage_dealt = 0.0 if enemy_lost_stock else max(0.0, enemy.percent - prev_enemy.percent)
     damage_taken = 0.0 if player_lost_stock else max(0.0, player.percent - prev_player.percent)
 
-    # 1% de dano provocado = +0.01 / 1% de dano sofrido = -0.01
-    reward += 0.01 * (damage_dealt - damage_taken)
+    # 1% de dano provocado = +0.02 / 1% de dano sofrido = -0.02
+    reward += 0.02 * (damage_dealt - damage_taken)
 
     # Punições por Posicionamento (Shaping Rewards)
+    stage_edge_x = melee.EDGE_GROUND_POSITION[curr_gs.stage]
     
-    # Longe do centro do palco (x = 0)
-    # Penalidade gradativa quanto mais longe do eixo central
-    dist_from_center = abs(player.x)
-    reward -= 0.00002 * dist_from_center
+    safe_zone_limit = stage_edge_x * 0.75
     
-    # Longe do oponente (distância Euclidiana)
-    # Incentiva o bot a se aproximar e engajar no combate
-    reward -= 0.00002 * curr_gs.distance
+    # Penaliza levemente o bot se ele estiver na beirada
+    dist_from_center = abs(player.position.x)
+    if dist_from_center > safe_zone_limit:
+        reward -= 0.0001 * (dist_from_center - safe_zone_limit)
+    
+    # Penaliza o "camping" extremo (fugir demais) baseando-se no tamanho do mapa
+    # Se a distância entre os jogadores for maior que o tamanho de meio palco
+    if curr_gs.distance > stage_edge_x:
+        reward -= 0.00005 * (curr_gs.distance - stage_edge_x)
     
     # Offstage (Fora da plataforma principal)
     if player.off_stage:
-        reward -= 0.002  # Punição contínua por frame/macro-step que ficar fora do palco
-    if enemy.off_stage:
-        reward += 0.002
+        reward -= 0.001  # Incentiva recuperações rápidas
+    if enemy.off_stage and not player.off_stage:
+        reward += 0.001  # Recompensa por manter o oponente fora do palco
 
     return reward

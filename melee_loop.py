@@ -96,7 +96,6 @@ def main():
     # Variáveis de Controle do Loop
     experiences = []
     episode_reward = 0
-    rewards_history = []
     episode_metrics_list = []
     in_game_flag = False
     
@@ -116,14 +115,14 @@ def main():
     if not os.path.exists(csv_filename):
         with open(csv_filename, 'w', newline='') as f:
             writer = csv.writer(f)
-            writer.writerow(["Episode", "Reward", "Avg_Reward", "CPU_Level", "Agent_Stock", "CPU_Stock"])
+            writer.writerow(["Episode", "Reward", "CPU_Level", "Agent_Stock", "CPU_Stock"])
             
     # Inicialização do CSV exclusivo para o melhor modelo
     best_csv_filename = "best_models_log.csv"
     if not os.path.exists(best_csv_filename):
         with open(best_csv_filename, 'w', newline='') as f:
             writer = csv.writer(f)
-            writer.writerow(["Episode", "Reward", "Best_Avg_Reward", "CPU_Level", "Agent_Stock", "CPU_Stock"])
+            writer.writerow(["Episode", "Reward", "CPU_Level", "Agent_Stock", "CPU_Stock"])
 
     logs_buffer = []
 
@@ -241,18 +240,13 @@ def main():
                 print(f"Recompensa do Episódio: {episode_reward:.2f}")
                 print(f"Estoque Final - Agent: {agent_stock} | CPU: {cpu_stock}")
                 
-                rewards_history.append(episode_reward)
-                
-                avg_reward = sum(rewards_history)/len(rewards_history)
-                print("Average Reward: ", avg_reward)
-                
                 avg_metrics = {}
                 if episode_metrics_list:
                     for k in episode_metrics_list[0].keys():
                         avg_metrics[k] = sum(m[k] for m in episode_metrics_list) / len(episode_metrics_list)
                     print(f"Métricas Médias do Episódio: {avg_metrics}")
 
-                logs_buffer.append([ep, episode_reward, avg_reward, CPU_LEVEL, agent_stock, cpu_stock])
+                logs_buffer.append([ep, episode_reward, CPU_LEVEL, agent_stock, cpu_stock])
 
                 checkpoint = {
                     'episode': ep,
@@ -264,8 +258,8 @@ def main():
                 }
 
                 # Salva melhor modelo
-                if avg_reward > best_reward:
-                    best_reward = avg_reward
+                if episode_reward > best_reward:
+                    best_reward = episode_reward
                     checkpoint['best_reward'] = best_reward
                     torch.save(checkpoint, "saved_models/model_best.pt")
                     print(f"*** Novo melhor modelo salvo! Recompensa: {best_reward:.2f} ***")
