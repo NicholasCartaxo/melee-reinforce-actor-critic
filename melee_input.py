@@ -1,5 +1,7 @@
 import melee
 import numpy as np
+import torch
+from collections import deque
 
 framedata = melee.FrameData()
 
@@ -167,3 +169,33 @@ def get_state(gamestate: melee.GameState, botPort: int, enemyPort: int) -> np.nd
   mlp_input = np.array(bot_features + enemy_features + general_features, dtype=np.float32)
   
   return mlp_input
+
+class StateBuffer:
+    def __init__(self, k=5, state_dim=720):
+        self.k = k
+        self.state_dim = state_dim
+        # Fila com capacidade máxima 5
+        self.buffer = deque(maxlen=k)
+
+    def reset(self, initial_state_tensor):
+        """Preenche os 5 slots com o primeiro estado ao iniciar/resetar o jogo."""
+        self.buffer.clear()
+        for _ in range(self.k):
+            self.buffer.append(initial_state_tensor)
+        return self.get_stacked_tensor()
+
+    def append(self, state_tensor):
+        """Adiciona o estado mais recente e remove o mais antigo automaticamente."""
+        self.buffer.append(state_tensor)
+        return self.get_stacked_tensor()
+
+    def get_stacked_tensor(self):
+        """Concatena os estados do buffer. Se não houver k elementos, repete o último."""
+        if len(self.buffer) == 0:
+            raise ValueError("StateBuffer está vazio! Chame reset() ou append() antes de get_stacked_tensor().")
+        
+        # Se por algum motivo o buffer tiver menos de 5 frames, repete o último até dar 5
+        while len(self.buffer) < self.k:
+            self.buffer.append(self.buffer[-1])
+            
+        return torch.cat(list(self.buffer), dim=-1)

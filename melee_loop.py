@@ -6,7 +6,8 @@ import torch
 import melee
 from dotenv import load_dotenv
 
-from melee_input import get_state
+from collections import deque
+from melee_input import StateBuffer, get_state
 from melee_output import tensor_to_controller
 from melee_reward import calculate_reward
 from melee_actor_critic import ActorCriticMelee, train_step
@@ -55,7 +56,7 @@ def main():
     menu_helper = melee.MenuHelper()
     os.makedirs("saved_models", exist_ok=True)
 
-    model = ActorCriticMelee(input_dim=720, num_actions=10)
+    model = ActorCriticMelee(input_dim=3600, num_actions=10)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=ALPHA)
 
@@ -66,10 +67,24 @@ def main():
     if os.path.exists(best_model_path):
         print(f"Loading checkpoint from {best_model_path}...")
         checkpoint = torch.load(best_model_path, weights_only=False)
-        best_reward = float('-inf')
-        model.load_state_dict(checkpoint['model_state_dict'])
-        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        ep = checkpoint.get('episode', 0) + 1
+        
+        try:
+            # Tenta carregar o modelo de forma estrita
+            model.load_state_dict(checkpoint['model_state_dict'])
+            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            ep = checkpoint.get('episode', 0) + 1
+            print(f"Checkpoint carregado com sucesso! Continuaremos a partir do Episódio {ep}.")
+        except RuntimeError as e:
+            # Se as dimensões da rede mudaram (ex: migração de 720D para 3600D), ignora o modelo antigo!
+            print("\n" + "="*80)
+            print("⚠️ AVISO DE INCOMPATIBILIDADE DE ARQUITETURA DETECTADO!")
+            print("O checkpoint existente foi criado com um modelo de tamanho diferente (ex: 720D vs 3600D).")
+            print("Iniciando um NOVO treinamento do zero com a nova arquitetura de 5 frames (3600D)...")
+            print("="*80 + "\n")
+            
+            # Reseta o número de episódios e ignora os pesos velhos
+            ep = 1
+            best_reward = float('-inf')
 
     # Variáveis de Controle do Loop
     experiences = []
@@ -90,6 +105,15 @@ def main():
 
     prev_gamestate = None
     t0 = time.time()
+    
+    # Instancia o buffer de 5 estados
+    state_buffer = StateBuffer(k=5, state_dim=720)
+
+    # --- INÍCIO DA PARTIDA ---
+    gamestate = console.step()
+
+    # Estado bruto atual (720D)
+    curr_raw_state = get_state(gamestate, agent_port, enemy_port)
 
     while True:
         gamestate = console.step()
@@ -104,14 +128,22 @@ def main():
             state_vec = get_state(gamestate, agent_port, enemy_port)
             state_tensor = torch.FloatTensor(state_vec)
 
+            # SE É O PRIMEIRO FRAME DA PARTIDA: Usa o seu reset() para preencher os 5 slots com o primeiro estado
+            if not in_game_flag:
+                in_game_flag = True
+                stacked_state = state_buffer.reset(state_tensor)  # 👈 Retorna o vetor já preenchido com 3600D!
+            else:
+                # Nos frames seguintes, adiciona normalmente
+                stacked_state = state_buffer.append(state_tensor)
+
             # -------------------------------------------------------------
             # 1. INÍCIO DO MACRO-STEP: Amostra uma nova ação sem gradiente
             # -------------------------------------------------------------
             if frame_skip_counter == 0:
-                macro_start_state = state_tensor
+                macro_start_state = stacked_state
 
                 with torch.no_grad():
-                    action_discrete, action_continuous = model.select_action(state_tensor)
+                    action_discrete, action_continuous = model.select_action(stacked_state)
                 
                 macro_action_idx = action_discrete.item()
                 macro_action_cont = action_continuous
@@ -119,6 +151,9 @@ def main():
             # -------------------------------------------------------------
             # 2. EXECUÇÃO DA AÇÃO
             # -------------------------------------------------------------
+            # Se macro_action_cont tem o formato (1, 2):
+            if macro_action_cont.dim() > 1:
+                macro_action_cont = macro_action_cont.squeeze(0) # Transforma (1, 2) em (2,)
             stick_x = macro_action_cont[0].item()
             stick_y = macro_action_cont[1].item()
             tensor_to_controller(controller, stick_x, stick_y, macro_action_idx)
@@ -133,19 +168,20 @@ def main():
 
             frame_skip_counter += 1
             prev_gamestate = gamestate
-            prev_state_tensor = state_tensor  # 👈 2. ATUALIZADO A CADA FRAME ATIVO
+            prev_state_tensor = stacked_state  # 👈 2. ATUALIZADO A CADA FRAME ATIVO
 
             # -------------------------------------------------------------
             # 4. FIM DO MACRO-STEP: Armazena a transição de 4 frames
             # -------------------------------------------------------------
             if frame_skip_counter >= FRAME_SKIP:
+                state_to_save = stacked_state.squeeze(0) if stacked_state.dim() > 1 else stacked_state
                 experiences.append((
                     macro_start_state,        # Estado no início dos 4 frames
                     macro_action_idx,         # Ação discreta executada
                     macro_action_cont,        # Ação contínua executada
                     accumulated_skip_reward,  # Recompensa TOTAL acumulada
                     False,                    # done = False
-                    state_tensor              # Estado final após os 4 frames
+                    state_to_save              # Estado final após os 4 frames
                 ))
 
                 frame_skip_counter = 0
@@ -232,6 +268,8 @@ def main():
                 in_game_flag = False
                 episode_reward = 0
                 episode_metrics_list = []
+
+                state_buffer.buffer.clear()
 
 if __name__ == "__main__":
     main()
