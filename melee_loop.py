@@ -1,20 +1,19 @@
 import signal
 import sys
 import os
+import time
 import torch
 import melee
-import csv
-import glob
-import re
 from dotenv import load_dotenv
 
-from melee_input import get_state
+from collections import deque
+from melee_input import StateBuffer, get_state
 from melee_output import tensor_to_controller
 from melee_reward import calculate_reward
 from melee_actor_critic import ActorCriticMelee, train_step
 
 # Configurações do Frame Skip e RL
-FRAME_SKIP = 2    # Repete a mesma ação por 2 frames (30 tomadas de decisão/s)
+FRAME_SKIP = 4    # Repete a mesma ação por 4 frames (15 tomadas de decisão/s)
 N_STEPS = 256
 ALPHA = 1e-4
 CPU_LEVEL = 3
@@ -58,44 +57,40 @@ def main():
     menu_helper = melee.MenuHelper()
     os.makedirs("saved_models", exist_ok=True)
 
-    model = ActorCriticMelee(input_dim=720, num_actions=10)
+    model = ActorCriticMelee(input_dim=3600, num_actions=10)
+
     optimizer = torch.optim.Adam(model.parameters(), lr=ALPHA)
 
+    best_model_path = "saved_models/model_ep_100.pt"
     ep = 1
     best_reward = float('-inf')
 
-    # Carregar best_reward a partir do model_best.pt
-    best_model_path = "saved_models/model_best.pt"
     if os.path.exists(best_model_path):
-        print(f"Loading best reward from {best_model_path}...")
-        best_checkpoint = torch.load(best_model_path, weights_only=False)
-        best_reward = best_checkpoint.get('best_reward', float('-inf'))
-        print(f"Current best average reward known: {best_reward:.2f}")
-
-    # Carregar o último modelo periódico para continuar o treinamento
-    model_files = glob.glob("saved_models/model_ep_*.pt")
-    latest_model_path = None
-    max_ep = 0
-    
-    for f in model_files:
-        match = re.search(r'model_ep_(\d+)\.pt', f)
-        if match:
-            ep_num = int(match.group(1))
-            if ep_num > max_ep:
-                max_ep = ep_num
-                latest_model_path = f
-
-    if latest_model_path and os.path.exists(latest_model_path):
-        print(f"Loading latest checkpoint to resume from {latest_model_path}...")
-        checkpoint = torch.load(latest_model_path, weights_only=False)
-        model.load_state_dict(checkpoint['model_state_dict'])
-        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        ep = checkpoint.get('episode', 0) + 1
-        print(f"Resuming from episode {ep}")
+        print(f"Loading checkpoint from {best_model_path}...")
+        checkpoint = torch.load(best_model_path, weights_only=False)
+        
+        try:
+            # Tenta carregar o modelo de forma estrita
+            model.load_state_dict(checkpoint['model_state_dict'])
+            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            ep = checkpoint.get('episode', 0) + 1
+            print(f"Checkpoint carregado com sucesso! Continuaremos a partir do Episódio {ep}.")
+        except RuntimeError as e:
+            # Se as dimensões da rede mudaram (ex: migração de 720D para 3600D), ignora o modelo antigo!
+            print("\n" + "="*80)
+            print("⚠️ AVISO DE INCOMPATIBILIDADE DE ARQUITETURA DETECTADO!")
+            print("O checkpoint existente foi criado com um modelo de tamanho diferente (ex: 720D vs 3600D).")
+            print("Iniciando um NOVO treinamento do zero com a nova arquitetura de 5 frames (3600D)...")
+            print("="*80 + "\n")
+            
+            # Reseta o número de episódios e ignora os pesos velhos
+            ep = 1
+            best_reward = float('-inf')
 
     # Variáveis de Controle do Loop
     experiences = []
     episode_reward = 0
+    rewards_history = []
     episode_metrics_list = []
     in_game_flag = False
     
@@ -107,24 +102,15 @@ def main():
     macro_start_state = None
     macro_action_idx = None
     macro_action_cont = None
-    prev_state_tensor = None
+    prev_state_tensor = None  # 👈 1. INICIALIZADO AQUI
+
     prev_gamestate = None
+    
+    # Instancia o buffer de 5 estados
+    state_buffer = StateBuffer(k=5, state_dim=720)
 
-    # Inicialização do CSV geral
-    csv_filename = "training_logs.csv"
-    if not os.path.exists(csv_filename):
-        with open(csv_filename, 'w', newline='') as f:
-            writer = csv.writer(f)
-            writer.writerow(["Episode", "Reward", "CPU_Level", "Agent_Stock", "CPU_Stock"])
-            
-    # Inicialização do CSV exclusivo para o melhor modelo
-    best_csv_filename = "best_models_log.csv"
-    if not os.path.exists(best_csv_filename):
-        with open(best_csv_filename, 'w', newline='') as f:
-            writer = csv.writer(f)
-            writer.writerow(["Episode", "Reward", "CPU_Level", "Agent_Stock", "CPU_Stock"])
-
-    logs_buffer = []
+    # --- INÍCIO DA PARTIDA ---
+    gamestate = console.step()
 
     while True:
         gamestate = console.step()
@@ -139,22 +125,39 @@ def main():
             state_vec = get_state(gamestate, agent_port, enemy_port)
             state_tensor = torch.FloatTensor(state_vec)
 
-            # INÍCIO DO MACRO-STEP
+            # SE É O PRIMEIRO FRAME DA PARTIDA: Usa o seu reset() para preencher os 5 slots com o primeiro estado
+            if not in_game_flag:
+                in_game_flag = True
+                stacked_state = state_buffer.reset(state_tensor)  # 👈 Retorna o vetor já preenchido com 3600D!
+            else:
+                # Nos frames seguintes, adiciona normalmente
+                stacked_state = state_buffer.append(state_tensor)
+
+            # -------------------------------------------------------------
+            # 1. INÍCIO DO MACRO-STEP: Amostra uma nova ação sem gradiente
+            # -------------------------------------------------------------
             if frame_skip_counter == 0:
-                macro_start_state = state_tensor
+                macro_start_state = stacked_state
 
                 with torch.no_grad():
-                    action_discrete, action_continuous = model.select_action(state_tensor)
+                    action_discrete, action_continuous = model.select_action(stacked_state)
                 
                 macro_action_idx = action_discrete.item()
                 macro_action_cont = action_continuous
 
-            # EXECUÇÃO DA AÇÃO
+            # -------------------------------------------------------------
+            # 2. EXECUÇÃO DA AÇÃO
+            # -------------------------------------------------------------
+            # Se macro_action_cont tem o formato (1, 2):
+            if macro_action_cont.dim() > 1:
+                macro_action_cont = macro_action_cont.squeeze(0) # Transforma (1, 2) em (2,)
             stick_x = macro_action_cont[0].item()
             stick_y = macro_action_cont[1].item()
             tensor_to_controller(controller, stick_x, stick_y, macro_action_idx)
 
-            # RECOMPENSA E ACÚMULO
+            # -------------------------------------------------------------
+            # 3. RECOMPENSA E ACÚMULO
+            # -------------------------------------------------------------
             if prev_gamestate is not None:
                 reward = calculate_reward(prev_gamestate, gamestate, agent_port, enemy_port)
                 accumulated_skip_reward += reward
@@ -162,17 +165,20 @@ def main():
 
             frame_skip_counter += 1
             prev_gamestate = gamestate
-            prev_state_tensor = state_tensor
+            prev_state_tensor = stacked_state  # 👈 2. ATUALIZADO A CADA FRAME ATIVO
 
-            # FIM DO MACRO-STEP: Armazena a transição de 2 frames
+            # -------------------------------------------------------------
+            # 4. FIM DO MACRO-STEP: Armazena a transição de 4 frames
+            # -------------------------------------------------------------
             if frame_skip_counter >= FRAME_SKIP:
+                state_to_save = stacked_state.squeeze(0) if stacked_state.dim() > 1 else stacked_state
                 experiences.append((
-                    macro_start_state,        # Estado no início dos 2 frames
+                    macro_start_state,        # Estado no início dos 4 frames
                     macro_action_idx,         # Ação discreta executada
                     macro_action_cont,        # Ação contínua executada
                     accumulated_skip_reward,  # Recompensa TOTAL acumulada
                     False,                    # done = False
-                    state_tensor              # Estado final após os 2 frames
+                    state_to_save              # Estado final após os 4 frames
                 ))
 
                 frame_skip_counter = 0
@@ -184,16 +190,10 @@ def main():
                     experiences = []
 
         else:
-            # TRATAMENTO DE FIM / COMEÇO DE PARTIDA
-            agent_stock = 0
-            cpu_stock = 0
-
+            # -------------------------------------------------------------
+            # TRATAMENTO DE FIM DE PARTIDA / MENUS
+            # -------------------------------------------------------------
             if prev_gamestate is not None:
-                if agent_port in prev_gamestate.players:
-                    agent_stock = prev_gamestate.players[agent_port].stock
-                if enemy_port in prev_gamestate.players:
-                    cpu_stock = prev_gamestate.players[enemy_port].stock
-
                 reward = calculate_reward(prev_gamestate, gamestate, agent_port, enemy_port)
                 accumulated_skip_reward += reward
                 episode_reward += reward
@@ -205,7 +205,7 @@ def main():
                         macro_action_cont,
                         accumulated_skip_reward,
                         True,               # done = True
-                        prev_state_tensor
+                        prev_state_tensor   # 👈 3. USADO AQUI COM SEGURANÇA
                     ))
 
                 if len(experiences) > 0:
@@ -238,52 +238,35 @@ def main():
             if in_game_flag:
                 print(f"--- Fim do Episódio {ep} ---")
                 print(f"Recompensa do Episódio: {episode_reward:.2f}")
-                print(f"Estoque Final - Agent: {agent_stock} | CPU: {cpu_stock}")
-                
+                rewards_history.append(episode_reward)
+                print("Average Reward: ", sum(rewards_history)/len(rewards_history))
+                print("Average Reward (last 10): ", sum(rewards_history[-10:])/min(len(rewards_history), 10))
+                averege_reward_last_ten = sum(rewards_history[-10:])/min(len(rewards_history), 10)
                 avg_metrics = {}
                 if episode_metrics_list:
                     for k in episode_metrics_list[0].keys():
                         avg_metrics[k] = sum(m[k] for m in episode_metrics_list) / len(episode_metrics_list)
                     print(f"Métricas Médias do Episódio: {avg_metrics}")
 
-                logs_buffer.append([ep, episode_reward, CPU_LEVEL, agent_stock, cpu_stock])
-
                 checkpoint = {
                     'episode': ep,
                     'model_state_dict': model.state_dict(),
                     'optimizer_state_dict': optimizer.state_dict(),
                     'episode_reward': episode_reward,
-                    'avg_metrics': avg_metrics,
-                    'best_reward': best_reward
+                    'avg_metrics': avg_metrics
                 }
 
-                # Salva melhor modelo
-                if episode_reward > best_reward:
-                    best_reward = episode_reward
-                    checkpoint['best_reward'] = best_reward
+                if averege_reward_last_ten > best_reward and len(rewards_history) > 9:
+                    best_reward = averege_reward_last_ten
                     torch.save(checkpoint, "saved_models/model_best.pt")
-                    print(f"*** Novo melhor modelo salvo! Recompensa: {best_reward:.2f} ***")
-                    
-                    # Escreve log exclusivo para o modelo de melhor performance
-                    with open(best_csv_filename, 'a', newline='') as f:
-                        writer = csv.writer(f)
-                        writer.writerow([ep, episode_reward, best_reward, CPU_LEVEL, agent_stock, cpu_stock])
-
-                # Salva a cada 100 modelos
-                if ep % 100 == 0:
-                    torch.save(checkpoint, f"saved_models/model_ep_{ep}.pt")
-                    print(f"*** Checkpoint periódico salvo: model_ep_{ep}.pt ***")
-                    
-                    # Atualiza CSV geral
-                    with open(csv_filename, 'a', newline='') as f:
-                        writer = csv.writer(f)
-                        writer.writerows(logs_buffer)
-                    logs_buffer = []
+                    print(f"*** Novo modelo salvo! Recompensa: {best_reward:.2f} ***")
 
                 ep += 1
                 in_game_flag = False
                 episode_reward = 0
                 episode_metrics_list = []
+
+                state_buffer.buffer.clear()
 
 if __name__ == "__main__":
     main()

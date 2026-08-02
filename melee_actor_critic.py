@@ -10,15 +10,15 @@ CRITIC_COEFF = 0.5       # Peso do erro do Critic na perda total
 MAX_GRAD_NORM = 0.5      # Limite de corte dos gradientes
 
 class ActorCriticMelee(nn.Module):
-    def __init__(self, input_dim=720, num_actions=10):
+    def __init__(self, input_dim=3600, num_actions=10):
         super().__init__()
         
         # Redimensionamento para 512 neurônios com LayerNorm
         self.shared = nn.Sequential(
-            nn.Linear(input_dim, 512),
-            nn.LayerNorm(512),
+            nn.Linear(input_dim, 1024),
+            nn.LayerNorm(1024),
             nn.LeakyReLU(0.01),
-            nn.Linear(512, 512),
+            nn.Linear(1024, 512),
             nn.LayerNorm(512),
             nn.LeakyReLU(0.01)
         )
@@ -38,20 +38,24 @@ class ActorCriticMelee(nn.Module):
                     nn.init.constant_(m.bias, 0.0)
 
     def forward(self, x):
-        x = self.shared(x)
-        probs = F.softmax(self.actor_discrete(x), dim=-1)
+        features = self.shared(x)
+        probs = F.softmax(self.actor_discrete(features), dim=-1)
         
         # Parametrização segura da distribuição Beta (alpha, beta >= 1.0)
-        ab = F.softplus(self.actor_continuous(x)) + 1.0
+        ab = F.softplus(self.actor_continuous(features)) + 1.0
         ab = torch.clamp(ab, min=1.01, max=50.0)
         alpha, beta = ab.chunk(2, dim=-1)
 
-        value = self.critic(x)
+        value = self.critic(features)
         return probs, alpha, beta, value
     
     @torch.no_grad()
     def select_action(self, state):
         """Amostragem rápida sem retenção de gradientes (Usada no loop de coleta)"""
+        # Se o estado veio como (3600,), adiciona dimensão de batch -> (1, 3600)
+        if state.dim() == 1:
+            state = state.unsqueeze(0)
+
         probs, alpha, beta, _ = self(state)
 
         dist_discrete = Categorical(probs)
