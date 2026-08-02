@@ -16,7 +16,7 @@ from melee_actor_critic import ActorCriticMelee, train_step
 FRAME_SKIP = 4    # Repete a mesma ação por 4 frames (15 tomadas de decisão/s)
 N_STEPS = 256
 ALPHA = 1e-4
-CPU_LEVEL = 3
+CPU_LEVEL = 5
 
 def main():
     load_dotenv()
