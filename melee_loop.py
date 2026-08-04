@@ -6,6 +6,7 @@ import melee
 import csv
 import glob
 import re
+import argparse
 from dotenv import load_dotenv
 
 from melee_input import get_state
@@ -20,6 +21,10 @@ ALPHA = 1e-4
 CPU_LEVEL = 9
 
 def main():
+    parser = argparse.ArgumentParser(description="Train Melee RL Agent")
+    parser.add_argument('--self-play', action='store_true', help="Treinar o agente contra si mesmo usando o modelo salvo mais recente")
+    args = parser.parse_args()
+
     load_dotenv()
     
     console = melee.Console(
@@ -35,12 +40,12 @@ def main():
     enemy_port = 4
 
     controller = melee.Controller(console=console, port=agent_port, type=melee.ControllerType.STANDARD)
-    cpuController = melee.Controller(console=console, port=enemy_port, type=melee.ControllerType.STANDARD)
-    controllers = [controller, cpuController]
+    enemy_controller = melee.Controller(console=console, port=enemy_port, type=melee.ControllerType.STANDARD)
+    controllers = [controller, enemy_controller]
 
     def signal_handler(sig, frame):
         controller.disconnect()
-        cpuController.disconnect()
+        enemy_controller.disconnect()
         console.stop()
         sys.exit(0)
 
@@ -61,16 +66,14 @@ def main():
     model = ActorCriticMelee(input_dim=720, num_actions=10)
     optimizer = torch.optim.Adam(model.parameters(), lr=ALPHA)
 
-    ep = 1
-    best_reward = float('-inf')
+    # Configuração do Oponente (Self-Play)
+    opponent_model = None
+    if args.self_play:
+        print("Modo Self-Play Ativado!")
+        opponent_model = ActorCriticMelee(input_dim=720, num_actions=10)
+        opponent_model.eval() # Modo de avaliação para não treinar este modelo independentemente
 
-    # Carregar best_reward a partir do model_best.pt
-    best_model_path = "saved_models/model_best.pt"
-    if os.path.exists(best_model_path):
-        print(f"Loading best reward from {best_model_path}...")
-        best_checkpoint = torch.load(best_model_path, weights_only=False)
-        best_reward = best_checkpoint.get('best_reward', float('-inf'))
-        print(f"Current best average reward known: {best_reward:.2f}")
+    ep = 1
 
     # Carregar o último modelo periódico para continuar o treinamento
     model_files = glob.glob("saved_models/model_ep_*.pt")
@@ -93,6 +96,10 @@ def main():
         ep = checkpoint.get('episode', 0) + 1
         print(f"Resuming from episode {ep}")
 
+        if args.self_play:
+            opponent_model.load_state_dict(checkpoint['model_state_dict'])
+            print("Modelo mais recente carregado para o oponente.")
+
     # Variáveis de Controle do Loop
     experiences = []
     episode_reward = 0
@@ -109,18 +116,15 @@ def main():
     macro_action_cont = None
     prev_state_tensor = None
     prev_gamestate = None
+    
+    # Registros para o Oponente (Self-play)
+    opp_macro_action_idx = None
+    opp_macro_action_cont = None
 
     # Inicialização do CSV geral
     csv_filename = "training_logs.csv"
     if not os.path.exists(csv_filename):
         with open(csv_filename, 'w', newline='') as f:
-            writer = csv.writer(f)
-            writer.writerow(["Episode", "Reward", "CPU_Level", "Agent_Stock", "CPU_Stock"])
-            
-    # Inicialização do CSV exclusivo para o melhor modelo
-    best_csv_filename = "best_models_log.csv"
-    if not os.path.exists(best_csv_filename):
-        with open(best_csv_filename, 'w', newline='') as f:
             writer = csv.writer(f)
             writer.writerow(["Episode", "Reward", "CPU_Level", "Agent_Stock", "CPU_Stock"])
 
@@ -143,16 +147,31 @@ def main():
             if frame_skip_counter == 0:
                 macro_start_state = state_tensor
 
+                # Ação do Agente Principal
                 with torch.no_grad():
                     action_discrete, action_continuous = model.select_action(state_tensor)
-                
                 macro_action_idx = action_discrete.item()
                 macro_action_cont = action_continuous
 
-            # EXECUÇÃO DA AÇÃO
+                # Ação do Oponente (Self-Play)
+                if args.self_play and opponent_model is not None:
+                    opp_state_vec = get_state(gamestate, enemy_port, agent_port) # Inverte as portas
+                    opp_state_tensor = torch.FloatTensor(opp_state_vec)
+                    with torch.no_grad():
+                        opp_act_d, opp_act_c = opponent_model.select_action(opp_state_tensor)
+                    opp_macro_action_idx = opp_act_d.item()
+                    opp_macro_action_cont = opp_act_c
+
+            # EXECUÇÃO DA AÇÃO - Agente Principal
             stick_x = macro_action_cont[0].item()
             stick_y = macro_action_cont[1].item()
             tensor_to_controller(controller, stick_x, stick_y, macro_action_idx)
+
+            # EXECUÇÃO DA AÇÃO - Oponente
+            if args.self_play and opp_macro_action_cont is not None:
+                opp_stick_x = opp_macro_action_cont[0].item()
+                opp_stick_y = opp_macro_action_cont[1].item()
+                tensor_to_controller(enemy_controller, opp_stick_x, opp_stick_y, opp_macro_action_idx)
 
             # RECOMPENSA E ACÚMULO
             if prev_gamestate is not None:
@@ -220,6 +239,9 @@ def main():
                 accumulated_skip_reward = 0.0
 
             # Gerenciamento dos menus
+            # Se for self-play, nível da CPU cai para 0 (Humano/Standby) para o script controlar o P4
+            opp_level = 0 if args.self_play else CPU_LEVEL
+
             menu_helper.menu_helper_simple(
                 gamestate=gamestate, controller=controller,
                 character_selected=melee.Character.LUIGI,
@@ -227,13 +249,14 @@ def main():
                 swag=False, autostart=False
             )
             menu_helper.menu_helper_simple(
-                gamestate=gamestate, controller=cpuController,
+                gamestate=gamestate, controller=enemy_controller,
                 character_selected=melee.Character.LUIGI,
                 stage_selected=melee.Stage.BATTLEFIELD,
-                cpu_level=CPU_LEVEL, swag=False, autostart=True
+                cpu_level=opp_level, swag=False, autostart=True
             )
+            
             controller.flush()
-            cpuController.flush()
+            enemy_controller.flush()
 
             if in_game_flag:
                 print(f"--- Fim do Episódio {ep} ---")
@@ -246,7 +269,7 @@ def main():
                         avg_metrics[k] = sum(m[k] for m in episode_metrics_list) / len(episode_metrics_list)
                     print(f"Métricas Médias do Episódio: {avg_metrics}")
 
-                logs_buffer.append([ep, episode_reward, CPU_LEVEL, agent_stock, cpu_stock])
+                logs_buffer.append([ep, episode_reward, opp_level, agent_stock, cpu_stock])
 
                 checkpoint = {
                     'episode': ep,
@@ -254,26 +277,18 @@ def main():
                     'optimizer_state_dict': optimizer.state_dict(),
                     'episode_reward': episode_reward,
                     'avg_metrics': avg_metrics,
-                    'best_reward': best_reward
                 }
-
-                # Salva melhor modelo
-                if episode_reward > best_reward:
-                    best_reward = episode_reward
-                    checkpoint['best_reward'] = best_reward
-                    torch.save(checkpoint, "saved_models/model_best.pt")
-                    print(f"*** Novo melhor modelo salvo! Recompensa: {best_reward:.2f} ***")
-                    
-                    # Escreve log exclusivo para o modelo de melhor performance
-                    with open(best_csv_filename, 'a', newline='') as f:
-                        writer = csv.writer(f)
-                        writer.writerow([ep, episode_reward, best_reward, CPU_LEVEL, agent_stock, cpu_stock])
 
                 # Salva a cada 100 modelos
                 if ep % 100 == 0:
                     torch.save(checkpoint, f"saved_models/model_ep_{ep}.pt")
                     print(f"*** Checkpoint periódico salvo: model_ep_{ep}.pt ***")
-                    
+
+                    # Atualiza o modelo do oponente de tempos em tempos com o último checkpoint do agente
+                    if args.self_play and opponent_model is not None:
+                        opponent_model.load_state_dict(model.state_dict())
+                        print("*** Modelo do Oponente (Self-Play) atualizado com os pesos mais recentes ***")
+
                     # Atualiza CSV geral
                     with open(csv_filename, 'a', newline='') as f:
                         writer = csv.writer(f)
