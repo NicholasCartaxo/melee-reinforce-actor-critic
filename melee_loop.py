@@ -213,10 +213,6 @@ def main():
                 if enemy_port in prev_gamestate.players:
                     cpu_stock = prev_gamestate.players[enemy_port].stock
 
-                reward = calculate_reward(prev_gamestate, gamestate, agent_port, enemy_port)
-                accumulated_skip_reward += reward
-                episode_reward += reward
-
                 if macro_start_state is not None and prev_state_tensor is not None:
                     experiences.append((
                         macro_start_state,
