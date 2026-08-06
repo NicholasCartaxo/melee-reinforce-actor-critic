@@ -23,29 +23,39 @@ CPU_LEVEL = 9
 def main():
     parser = argparse.ArgumentParser(description="Train Melee RL Agent")
     parser.add_argument('--self-play', action='store_true', help="Treinar o agente contra si mesmo usando o modelo salvo mais recente")
+    parser.add_argument('--play-human', action='store_true', help="Jogue contra o agente. Desativa o treinamento e permite controle manual do P4.")
     args = parser.parse_args()
+
+    if args.play_human and args.self_play:
+        print("Erro: --play-human e --self-play não podem ser usados juntos.")
+        sys.exit(-1)
 
     load_dotenv()
     
     console = melee.Console(
-        path=os.getenv("MAINLINE_PATH"),
+        path=os.getenv("MAINLINE_PATH") if not args.play_human else os.getenv("MAINLINE_PLAYER_PATH"),
         fullscreen=False,
         save_replays=False,
-        disable_audio=True,
-        emulation_speed=0,
-        gfx_backend="Null",
+        disable_audio= not args.play_human,
+        emulation_speed= 0 if not args.play_human else 1,
+        gfx_backend="Null" if not args.play_human else "",
     )
 
     agent_port = 1
-    enemy_port = 4
+    enemy_port = 4 if not args.play_human else 2 # inimigo humano configurado na porta 2
 
     controller = melee.Controller(console=console, port=agent_port, type=melee.ControllerType.STANDARD)
-    enemy_controller = melee.Controller(console=console, port=enemy_port, type=melee.ControllerType.STANDARD)
-    controllers = [controller, enemy_controller]
+    
+    enemy_controller = None
+    controllers = [controller]
+    
+    if not args.play_human:
+        enemy_controller = melee.Controller(console=console, port=enemy_port, type=melee.ControllerType.STANDARD)
+        controllers.append(enemy_controller)
 
     def signal_handler(sig, frame):
-        controller.disconnect()
-        enemy_controller.disconnect()
+        for c in controllers:
+            c.disconnect()
         console.stop()
         sys.exit(0)
 
@@ -66,16 +76,21 @@ def main():
     model = ActorCriticMelee(input_dim=720, num_actions=10)
     optimizer = torch.optim.Adam(model.parameters(), lr=ALPHA)
 
+    if args.play_human:
+        print("Modo Humano Ativado! O agente está apenas em modo de inferência (Treinamento desativado).")
+        print(f"Certifique-se de configurar seu controle no Dolphin para a Porta {enemy_port}.")
+        model.eval()
+
     # Configuração do Oponente (Self-Play)
     opponent_model = None
     if args.self_play:
         print("Modo Self-Play Ativado!")
         opponent_model = ActorCriticMelee(input_dim=720, num_actions=10)
-        opponent_model.eval() # Modo de avaliação para não treinar este modelo independentemente
+        opponent_model.eval()
 
     ep = 1
 
-    # Carregar o último modelo periódico para continuar o treinamento
+    # Carregar o último modelo periódico para continuar o treinamento ou avaliar
     model_files = glob.glob("saved_models/model_ep_*.pt")
     latest_model_path = None
     max_ep = 0
@@ -89,12 +104,15 @@ def main():
                 latest_model_path = f
 
     if latest_model_path and os.path.exists(latest_model_path):
-        print(f"Loading latest checkpoint to resume from {latest_model_path}...")
+        print(f"Loading latest checkpoint from {latest_model_path}...")
         checkpoint = torch.load(latest_model_path, weights_only=False)
         model.load_state_dict(checkpoint['model_state_dict'])
-        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        ep = checkpoint.get('episode', 0) + 1
-        print(f"Resuming from episode {ep}")
+        if not args.play_human:
+            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            ep = checkpoint.get('episode', 0) + 1
+            print(f"Resuming training from episode {ep}")
+        else:
+            print("Pesos carregados para avaliação contra jogador humano.")
 
         if args.self_play:
             opponent_model.load_state_dict(checkpoint['model_state_dict'])
@@ -121,9 +139,9 @@ def main():
     opp_macro_action_idx = None
     opp_macro_action_cont = None
 
-    # Inicialização do CSV geral
+    # Inicialização do CSV geral (apenas se treinando)
     csv_filename = "training_logs.csv"
-    if not os.path.exists(csv_filename):
+    if not args.play_human and not os.path.exists(csv_filename):
         with open(csv_filename, 'w', newline='') as f:
             writer = csv.writer(f)
             writer.writerow(["Episode", "Reward", "CPU_Level", "Agent_Stock", "CPU_Stock"])
@@ -155,7 +173,7 @@ def main():
 
                 # Ação do Oponente (Self-Play)
                 if args.self_play and opponent_model is not None:
-                    opp_state_vec = get_state(gamestate, enemy_port, agent_port) # Inverte as portas
+                    opp_state_vec = get_state(gamestate, enemy_port, agent_port)
                     opp_state_tensor = torch.FloatTensor(opp_state_vec)
                     with torch.no_grad():
                         opp_act_d, opp_act_c = opponent_model.select_action(opp_state_tensor)
@@ -183,21 +201,22 @@ def main():
             prev_gamestate = gamestate
             prev_state_tensor = state_tensor
 
-            # FIM DO MACRO-STEP: Armazena a transição de 2 frames
+            # FIM DO MACRO-STEP: Armazena a transição e Treina
             if frame_skip_counter >= FRAME_SKIP:
-                experiences.append((
-                    macro_start_state,        # Estado no início dos 2 frames
-                    macro_action_idx,         # Ação discreta executada
-                    macro_action_cont,        # Ação contínua executada
-                    accumulated_skip_reward,  # Recompensa TOTAL acumulada
-                    False,                    # done = False
-                    state_tensor              # Estado final após os 2 frames
-                ))
+                if not args.play_human:
+                    experiences.append((
+                        macro_start_state,        # Estado no início dos 2 frames
+                        macro_action_idx,         # Ação discreta executada
+                        macro_action_cont,        # Ação contínua executada
+                        accumulated_skip_reward,  # Recompensa TOTAL acumulada
+                        False,                    # done = False
+                        state_tensor              # Estado final após os 2 frames
+                    ))
 
                 frame_skip_counter = 0
                 accumulated_skip_reward = 0.0
 
-                if len(experiences) >= N_STEPS:
+                if not args.play_human and len(experiences) >= N_STEPS:
                     metrics = train_step(model, optimizer, experiences)
                     episode_metrics_list.append(metrics)
                     experiences = []
@@ -213,7 +232,7 @@ def main():
                 if enemy_port in prev_gamestate.players:
                     cpu_stock = prev_gamestate.players[enemy_port].stock
 
-                if macro_start_state is not None and prev_state_tensor is not None:
+                if not args.play_human and macro_start_state is not None and prev_state_tensor is not None:
                     experiences.append((
                         macro_start_state,
                         macro_action_idx,
@@ -223,7 +242,7 @@ def main():
                         prev_state_tensor
                     ))
 
-                if len(experiences) > 0:
+                if not args.play_human and len(experiences) > 0:
                     metrics = train_step(model, optimizer, experiences)
                     episode_metrics_list.append(metrics)
                     experiences = []
@@ -235,8 +254,8 @@ def main():
                 accumulated_skip_reward = 0.0
 
             # Gerenciamento dos menus
-            # Se for self-play, nível da CPU cai para 0 (Humano/Standby) para o script controlar o P4
-            opp_level = 0 if args.self_play else CPU_LEVEL
+            # Se humano joga, deixamos o autostart desligado para o jogador poder configurar e dar o start manual
+            opp_level = 0 if (args.self_play or args.play_human) else CPU_LEVEL
 
             menu_helper.menu_helper_simple(
                 gamestate=gamestate, controller=controller,
@@ -244,52 +263,55 @@ def main():
                 stage_selected=melee.Stage.BATTLEFIELD,
                 swag=False, autostart=False
             )
-            menu_helper.menu_helper_simple(
-                gamestate=gamestate, controller=enemy_controller,
-                character_selected=melee.Character.LUIGI,
-                stage_selected=melee.Stage.BATTLEFIELD,
-                cpu_level=opp_level, swag=False, autostart=True
-            )
+            
+            if not args.play_human:
+                menu_helper.menu_helper_simple(
+                    gamestate=gamestate, controller=enemy_controller,
+                    character_selected=melee.Character.LUIGI,
+                    stage_selected=melee.Stage.BATTLEFIELD,
+                    cpu_level=opp_level, swag=False, autostart=True
+                )
+                enemy_controller.flush()
             
             controller.flush()
-            enemy_controller.flush()
 
             if in_game_flag:
                 print(f"--- Fim do Episódio {ep} ---")
                 print(f"Recompensa do Episódio: {episode_reward:.2f}")
-                print(f"Estoque Final - Agent: {agent_stock} | CPU: {cpu_stock}")
+                print(f"Estoque Final - Agent: {agent_stock} | Enemy: {cpu_stock}")
                 
-                avg_metrics = {}
-                if episode_metrics_list:
-                    for k in episode_metrics_list[0].keys():
-                        avg_metrics[k] = sum(m[k] for m in episode_metrics_list) / len(episode_metrics_list)
-                    print(f"Métricas Médias do Episódio: {avg_metrics}")
+                if not args.play_human:
+                    avg_metrics = {}
+                    if episode_metrics_list:
+                        for k in episode_metrics_list[0].keys():
+                            avg_metrics[k] = sum(m[k] for m in episode_metrics_list) / len(episode_metrics_list)
+                        print(f"Métricas Médias do Episódio: {avg_metrics}")
 
-                logs_buffer.append([ep, episode_reward, opp_level, agent_stock, cpu_stock])
+                    logs_buffer.append([ep, episode_reward, opp_level, agent_stock, cpu_stock])
 
-                checkpoint = {
-                    'episode': ep,
-                    'model_state_dict': model.state_dict(),
-                    'optimizer_state_dict': optimizer.state_dict(),
-                    'episode_reward': episode_reward,
-                    'avg_metrics': avg_metrics,
-                }
+                    checkpoint = {
+                        'episode': ep,
+                        'model_state_dict': model.state_dict(),
+                        'optimizer_state_dict': optimizer.state_dict(),
+                        'episode_reward': episode_reward,
+                        'avg_metrics': avg_metrics,
+                    }
 
-                # Salva a cada 100 modelos
-                if ep % 100 == 0:
-                    torch.save(checkpoint, f"saved_models/model_ep_{ep}.pt")
-                    print(f"*** Checkpoint periódico salvo: model_ep_{ep}.pt ***")
+                    # Salva a cada 100 modelos
+                    if ep % 100 == 0:
+                        torch.save(checkpoint, f"saved_models/model_ep_{ep}.pt")
+                        print(f"*** Checkpoint periódico salvo: model_ep_{ep}.pt ***")
 
-                    # Atualiza o modelo do oponente de tempos em tempos com o último checkpoint do agente
-                    if args.self_play and opponent_model is not None:
-                        opponent_model.load_state_dict(model.state_dict())
-                        print("*** Modelo do Oponente (Self-Play) atualizado com os pesos mais recentes ***")
+                        # Atualiza o modelo do oponente de tempos em tempos com o último checkpoint do agente
+                        if args.self_play and opponent_model is not None:
+                            opponent_model.load_state_dict(model.state_dict())
+                            print("*** Modelo do Oponente (Self-Play) atualizado com os pesos mais recentes ***")
 
-                    # Atualiza CSV geral
-                    with open(csv_filename, 'a', newline='') as f:
-                        writer = csv.writer(f)
-                        writer.writerows(logs_buffer)
-                    logs_buffer = []
+                        # Atualiza CSV geral
+                        with open(csv_filename, 'a', newline='') as f:
+                            writer = csv.writer(f)
+                            writer.writerows(logs_buffer)
+                        logs_buffer = []
 
                 ep += 1
                 in_game_flag = False
