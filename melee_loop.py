@@ -39,6 +39,7 @@ def main():
         disable_audio= not args.play_human,
         emulation_speed= 0 if not args.play_human else 1,
         gfx_backend="Null" if not args.play_human else "",
+        copy_home_directory=True
     )
 
     agent_port = 1
