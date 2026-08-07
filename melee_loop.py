@@ -88,7 +88,7 @@ def main():
     critic = Critic(input_dim=INPUT_DIM).to(device)
     
     actor_optimizer = torch.optim.Adam(actor.parameters(), lr=ALPHA)
-    critic_optimizer = torch.optim.Adam(critic.parameters(), lr=ALPHA)
+    critic_optimizer = torch.optim.Adam(critic.parameters(), lr=BETA)
 
     if args.play_human:
         print("Modo Humano Ativado! O agente está apenas em modo de inferência (Treinamento desativado).")
