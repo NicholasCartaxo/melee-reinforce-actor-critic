@@ -91,10 +91,11 @@ def train_step(actor, critic, actor_optimizer, critic_optimizer, experiences):
     """
     # 1. Extração
     states = torch.stack([e[0] for e in experiences])
-    actions_disc = torch.tensor([e[1] for e in experiences], dtype=torch.long)
+    device = states.device
+    actions_disc = torch.tensor([e[1] for e in experiences], dtype=torch.long, device=device)
     actions_cont = torch.stack([e[2] for e in experiences])
-    rewards = torch.tensor([e[3] for e in experiences], dtype=torch.float32)
-    dones = torch.tensor([e[4] for e in experiences], dtype=torch.float32)
+    rewards = torch.tensor([e[3] for e in experiences], dtype=torch.float32, device=device)
+    dones = torch.tensor([e[4] for e in experiences], dtype=torch.float32, device=device)
     next_states = torch.stack([e[5] for e in experiences])
 
     # 2. Avaliação do Critic (Isolado)

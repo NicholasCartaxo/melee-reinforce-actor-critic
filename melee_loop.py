@@ -78,8 +78,26 @@ def main():
     # ==========================================
     # 2. INICIALIZAÇÃO DOS MODELOS E OTIMIZADORES
     # ==========================================
-    actor = Actor(input_dim=720, num_actions=10)
-    critic = Critic(input_dim=720)
+    torch.set_float32_matmul_precision('high')
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"*** PyTorch using device: {device} ***")
+    
+    INPUT_DIM = 720
+    
+    actor = Actor(input_dim=INPUT_DIM, num_actions=10).to(device)
+    critic = Critic(input_dim=INPUT_DIM).to(device)
+    
+    if int(torch.__version__.split('.')[0]) >= 2:
+        print("Compiling models with torch.compile()...")
+        actor = torch.compile(actor)
+        critic = torch.compile(critic)
+        
+        print("Pre-warming the PyTorch compiler (this will take 30-60 seconds)...")
+        dummy_state = torch.zeros(INPUT_DIM, dtype=torch.float32, device=device)
+        with torch.no_grad():
+            actor(dummy_state)
+            critic(dummy_state)
+        print("Warmup complete! Now connecting to Dolphin...")
     
     actor_optimizer = torch.optim.Adam(actor.parameters(), lr=ALPHA)
     critic_optimizer = torch.optim.Adam(critic.parameters(), lr=ALPHA)
@@ -93,7 +111,7 @@ def main():
     # Configuração do Oponente (Self-Play)
     if args.self_play:
         print("Modo Self-Play Ativado!")
-        opponent_actor = Actor(input_dim=720, num_actions=10)
+        opponent_actor = Actor(input_dim=720, num_actions=10).to(device)
         opponent_actor.eval()
 
     ep = 1
@@ -175,7 +193,7 @@ def main():
 
             in_game_flag = True
             state_vec = get_state(gamestate, agent_port, enemy_port)
-            state_tensor = torch.FloatTensor(state_vec)
+            state_tensor = torch.FloatTensor(state_vec).to(device)
 
             # INÍCIO DO MACRO-STEP
             if frame_skip_counter == 0:
