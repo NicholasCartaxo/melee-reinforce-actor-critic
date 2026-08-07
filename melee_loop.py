@@ -208,7 +208,7 @@ def main():
                 # Ação do Oponente (Self-Play)
                 if args.self_play and opponent_actor is not None:
                     opp_state_vec = get_state(gamestate, enemy_port, agent_port)
-                    opp_state_tensor = torch.FloatTensor(opp_state_vec)
+                    opp_state_tensor = torch.FloatTensor(opp_state_vec).to(device)
                     with torch.no_grad():
                         opp_act_d, opp_act_c = opponent_actor.select_action(opp_state_tensor)
                     opp_macro_action_idx = opp_act_d.item()
