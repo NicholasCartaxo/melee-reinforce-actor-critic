@@ -87,6 +87,18 @@ def main():
     actor = Actor(input_dim=INPUT_DIM, num_actions=10).to(device)
     critic = Critic(input_dim=INPUT_DIM).to(device)
     
+    if int(torch.__version__.split('.')[0]) >= 2:
+        print("Compiling models with torch.compile()...")
+        actor = torch.compile(actor)
+        critic = torch.compile(critic)
+        
+        print("Pre-warming the PyTorch compiler (this will take 30-60 seconds)...")
+        dummy_state = torch.zeros(INPUT_DIM, dtype=torch.float32, device=device)
+        with torch.no_grad():
+            actor(dummy_state)
+            critic(dummy_state)
+        print("Warmup complete! Now connecting to Dolphin...")
+    
     actor_optimizer = torch.optim.Adam(actor.parameters(), lr=ALPHA)
     critic_optimizer = torch.optim.Adam(critic.parameters(), lr=BETA)
 
@@ -138,19 +150,6 @@ def main():
         if args.self_play:
             opponent_actor.load_state_dict(checkpoint['actor_state_dict'])
             print("Modelo mais recente carregado para o oponente.")
-
-
-    if int(torch.__version__.split('.')[0]) >= 2:
-        print("Compiling models with torch.compile()...")
-        actor = torch.compile(actor)
-        critic = torch.compile(critic)
-        
-        print("Pre-warming the PyTorch compiler (this will take 30-60 seconds)...")
-        dummy_state = torch.zeros(INPUT_DIM, dtype=torch.float32, device=device)
-        with torch.no_grad():
-            actor(dummy_state)
-            critic(dummy_state)
-        print("Warmup complete! Now connecting to Dolphin...")
 
     # Variáveis de Controle do Loop
     experiences = []
