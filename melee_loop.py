@@ -159,7 +159,8 @@ def main():
     if not args.play_human and not os.path.exists(csv_filename):
         with open(csv_filename, 'w', newline='') as f:
             writer = csv.writer(f)
-            writer.writerow(["Episode", "Reward", "CPU_Level", "Agent_Stock", "CPU_Stock"])
+            # Atualizado para incluir as novas métricas de log
+            writer.writerow(["Episode", "Reward", "CPU_Level", "Agent_Stock", "CPU_Stock", "Actor_Loss", "Critic_Loss", "Entropy"])
 
     logs_buffer = []
 
@@ -305,7 +306,13 @@ def main():
                             avg_metrics[k] = sum(m[k] for m in episode_metrics_list) / len(episode_metrics_list)
                         print(f"Métricas Médias do Episódio: {avg_metrics}")
 
-                    logs_buffer.append([ep, episode_reward, opp_level, agent_stock, cpu_stock])
+                    # Extrai os valores usando o .get para evitar key errors caso as chaves não existam ou estejam vazias
+                    a_loss = avg_metrics.get('actor_loss', 0.0)
+                    c_loss = avg_metrics.get('critic_loss', 0.0)
+                    ent = avg_metrics.get('entropy', 0.0)
+
+                    # Adiciona as novas métricas ao buffer
+                    logs_buffer.append([ep, episode_reward, opp_level, agent_stock, cpu_stock, a_loss, c_loss, ent])
 
                     # ==========================================
                     # 5. SALVAMENTO DE CHECKPOINT ATUALIZADO
