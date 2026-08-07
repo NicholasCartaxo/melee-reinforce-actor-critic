@@ -12,12 +12,13 @@ from dotenv import load_dotenv
 from melee_input import get_state
 from melee_output import tensor_to_controller
 from melee_reward import calculate_reward
-from melee_actor_critic import ActorCriticMelee, train_step
+from melee_actor_critic import Actor, Critic, train_step
 
 # Configurações do Frame Skip e RL
 FRAME_SKIP = 2    # Repete a mesma ação por 2 frames (30 tomadas de decisão/s)
 N_STEPS = 256
 ALPHA = 1e-4
+BETA = 3e-4
 CPU_LEVEL = 9
 
 def main():
@@ -74,20 +75,26 @@ def main():
     menu_helper = melee.MenuHelper()
     os.makedirs("saved_models", exist_ok=True)
 
-    model = ActorCriticMelee(input_dim=720, num_actions=10)
-    optimizer = torch.optim.Adam(model.parameters(), lr=ALPHA)
+    # ==========================================
+    # 2. INICIALIZAÇÃO DOS MODELOS E OTIMIZADORES
+    # ==========================================
+    actor = Actor(input_dim=720, num_actions=10)
+    critic = Critic(input_dim=720)
+    
+    actor_optimizer = torch.optim.Adam(actor.parameters(), lr=ALPHA)
+    critic_optimizer = torch.optim.Adam(critic.parameters(), lr=ALPHA)
 
     if args.play_human:
         print("Modo Humano Ativado! O agente está apenas em modo de inferência (Treinamento desativado).")
         print(f"Certifique-se de configurar seu controle no Dolphin para a Porta {enemy_port}.")
-        model.eval()
+        actor.eval()
+        critic.eval()
 
     # Configuração do Oponente (Self-Play)
-    opponent_model = None
     if args.self_play:
         print("Modo Self-Play Ativado!")
-        opponent_model = ActorCriticMelee(input_dim=720, num_actions=10)
-        opponent_model.eval()
+        opponent_actor = Actor(input_dim=720, num_actions=10)
+        opponent_actor.eval()
 
     ep = 1
 
@@ -104,19 +111,26 @@ def main():
                 max_ep = ep_num
                 latest_model_path = f
 
+    # ==========================================
+    # 3. CARREGAMENTO DOS CHECKPOINTS
+    # ==========================================
     if latest_model_path and os.path.exists(latest_model_path):
         print(f"Loading latest checkpoint from {latest_model_path}...")
         checkpoint = torch.load(latest_model_path, weights_only=False)
-        model.load_state_dict(checkpoint['model_state_dict'])
+        
+        actor.load_state_dict(checkpoint['actor_state_dict'])
+        critic.load_state_dict(checkpoint['critic_state_dict'])
+        
         if not args.play_human:
-            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            actor_optimizer.load_state_dict(checkpoint['actor_optimizer_state_dict'])
+            critic_optimizer.load_state_dict(checkpoint['critic_optimizer_state_dict'])
             ep = checkpoint.get('episode', 0) + 1
             print(f"Resuming training from episode {ep}")
         else:
             print("Pesos carregados para avaliação contra jogador humano.")
 
         if args.self_play:
-            opponent_model.load_state_dict(checkpoint['model_state_dict'])
+            opponent_actor.load_state_dict(checkpoint['actor_state_dict'])
             print("Modelo mais recente carregado para o oponente.")
 
     # Variáveis de Controle do Loop
@@ -168,16 +182,16 @@ def main():
 
                 # Ação do Agente Principal
                 with torch.no_grad():
-                    action_discrete, action_continuous = model.select_action(state_tensor)
+                    action_discrete, action_continuous = actor.select_action(state_tensor)
                 macro_action_idx = action_discrete.item()
                 macro_action_cont = action_continuous
 
                 # Ação do Oponente (Self-Play)
-                if args.self_play and opponent_model is not None:
+                if args.self_play and opponent_actor is not None:
                     opp_state_vec = get_state(gamestate, enemy_port, agent_port)
                     opp_state_tensor = torch.FloatTensor(opp_state_vec)
                     with torch.no_grad():
-                        opp_act_d, opp_act_c = opponent_model.select_action(opp_state_tensor)
+                        opp_act_d, opp_act_c = opponent_actor.select_action(opp_state_tensor)
                     opp_macro_action_idx = opp_act_d.item()
                     opp_macro_action_cont = opp_act_c
 
@@ -218,7 +232,10 @@ def main():
                 accumulated_skip_reward = 0.0
 
                 if not args.play_human and len(experiences) >= N_STEPS:
-                    metrics = train_step(model, optimizer, experiences)
+                    # ==========================================
+                    # 4. CHAMADA DE TREINAMENTO ATUALIZADA
+                    # ==========================================
+                    metrics = train_step(actor, critic, actor_optimizer, critic_optimizer, experiences)
                     episode_metrics_list.append(metrics)
                     experiences = []
 
@@ -244,7 +261,7 @@ def main():
                     ))
 
                 if not args.play_human and len(experiences) > 0:
-                    metrics = train_step(model, optimizer, experiences)
+                    metrics = train_step(actor, critic, actor_optimizer, critic_optimizer, experiences)
                     episode_metrics_list.append(metrics)
                     experiences = []
 
@@ -290,10 +307,15 @@ def main():
 
                     logs_buffer.append([ep, episode_reward, opp_level, agent_stock, cpu_stock])
 
+                    # ==========================================
+                    # 5. SALVAMENTO DE CHECKPOINT ATUALIZADO
+                    # ==========================================
                     checkpoint = {
                         'episode': ep,
-                        'model_state_dict': model.state_dict(),
-                        'optimizer_state_dict': optimizer.state_dict(),
+                        'actor_state_dict': actor.state_dict(),
+                        'critic_state_dict': critic.state_dict(),
+                        'actor_optimizer_state_dict': actor_optimizer.state_dict(),
+                        'critic_optimizer_state_dict': critic_optimizer.state_dict(),
                         'episode_reward': episode_reward,
                         'avg_metrics': avg_metrics,
                     }
@@ -304,8 +326,8 @@ def main():
                         print(f"*** Checkpoint periódico salvo: model_ep_{ep}.pt ***")
 
                         # Atualiza o modelo do oponente de tempos em tempos com o último checkpoint do agente
-                        if args.self_play and opponent_model is not None:
-                            opponent_model.load_state_dict(model.state_dict())
+                        if args.self_play and opponent_actor is not None:
+                            opponent_actor.load_state_dict(actor.state_dict())
                             print("*** Modelo do Oponente (Self-Play) atualizado com os pesos mais recentes ***")
 
                         # Atualiza CSV geral
